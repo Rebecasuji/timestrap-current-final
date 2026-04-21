@@ -159,15 +159,16 @@ export const getProjects = async (userRole?: string, userEmpCode?: string, userD
     // Apply client-side department filtering if user has department (including admins)
     // ⚡ SPECIAL BYPASS: Admin (specifically E0001) sees ALL projects regardless of department
     // ⚡ SPECIAL RESTRICTION: Controller (specifically E0046) sees ONLY Software Development projects
-    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001';
+    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001' || userEmpCode === 'E0046' || userEmpCode === 'E0002' || userEmpCode === 'E0048';
+    console.log(`👤 User context: role=${userRole}, empCode=${userEmpCode}, isAdmin=${isAdmin}`);
     
-    if (userEmpCode === 'E0046') {
-      console.log("🔄 Applying SPECIAL RESTRICTION for E0046: Software Development projects only");
+    if (userEmpCode === 'E0046' || userEmpCode === 'E0048') {
+      console.log(`🔄 Applying SPECIAL RESTRICTION for ${userEmpCode}: Software Development projects only`);
       const softwareProjects = enrichedProjects.filter(p => 
         p.project_name.toLowerCase().includes('software development') || 
         (Array.isArray(p.department) && p.department.some(d => d.toLowerCase().includes('software')))
       );
-      console.log(`📊 E0046 special filter: ${softwareProjects.length} projects`);
+      console.log(`📊 ${userEmpCode} special filter: ${softwareProjects.length} projects`);
       return softwareProjects;
     }
 
@@ -227,7 +228,7 @@ export const getProjects = async (userRole?: string, userEmpCode?: string, userD
 export const getTasks = async (projectId?: string, userDepartment?: string, userEmpCode?: string, userRole?: string): Promise<PMSTask[]> => {
   try {
     console.log("📡 Executing PMS getTasks query for project:", projectId, "userRole:", userRole, "userEmpCode:", userEmpCode);
-    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001';
+    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001' || userEmpCode === 'E0046' || userEmpCode === 'E0002' || userEmpCode === 'E0048';
 
     let query = 'SELECT * FROM project_tasks ORDER BY task_name';
     const params: any[] = [];
@@ -278,7 +279,7 @@ export const getTasks = async (projectId?: string, userDepartment?: string, user
 export const getTasksByProject = async (projectId: string, userDepartment?: string, userEmpCode?: string, userRole?: string): Promise<PMSTask[]> => {
   try {
     console.log("🔍 PMS getTasksByProject called with projectId:", projectId, "userEmpCode:", userEmpCode, "userRole:", userRole);
-    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001';
+    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001' || userEmpCode === 'E0046' || userEmpCode === 'E0002' || userEmpCode === 'E0048';
 
     console.log("📡 Executing PMS getTasksByProject query...");
 
@@ -316,9 +317,12 @@ export const getSubtasks = async (taskId?: string, userDepartment?: string, user
 
     console.log("📡 Executing PMS getSubtasks query (fetching all subtasks)...");
 
-    const result: QueryResult = await pmsPool.query(
-      'SELECT * FROM subtasks'
-    );
+    // Enhanced query to join employees for subtask assignment matching
+    const result: QueryResult = await pmsPool.query(`
+      SELECT s.*, e.emp_code as assigned_emp_code 
+      FROM subtasks s
+      LEFT JOIN employees e ON s.assigned_to::text = e.id::text OR s.assigned_to::text = e.emp_code::text
+    `);
 
     let subtasks = result.rows as PMSSubtask[] || [];
     console.log(`📊 PMS subtasks returned: ${subtasks.length} subtasks`);
@@ -340,7 +344,12 @@ export const getSubtasks = async (taskId?: string, userDepartment?: string, user
           const isNotCompleted = !subtask.is_completed && (subtask.progress === undefined || subtask.progress < 100);
 
           // Match assignment if userEmpCode is provided
-          const isAssigned = !userEmpCode || (subtask.assigned_to && String(subtask.assigned_to).toLowerCase() === String(userEmpCode).toLowerCase());
+          // Match assignment if userEmpCode is provided - check both UUID match (via joined emp_code) and direct code match
+          const isAssigned = !userEmpCode || 
+            (subtask.assigned_to && (
+              String(subtask.assigned_to).toLowerCase() === String(userEmpCode).toLowerCase() ||
+              String((subtask as any).assigned_emp_code).toLowerCase() === String(userEmpCode).toLowerCase()
+            ));
 
           return isTaskMatch && isNotCompleted && isAssigned;
         });
@@ -349,7 +358,11 @@ export const getSubtasks = async (taskId?: string, userDepartment?: string, user
         // If no taskId, still filter by assignment and completion
         subtasks = subtasks.filter(s => {
           const isNotCompleted = !s.is_completed && (s.progress === undefined || s.progress < 100);
-          const isAssigned = !userEmpCode || (s.assigned_to && String(s.assigned_to).toLowerCase() === String(userEmpCode).toLowerCase());
+          const isAssigned = !userEmpCode || 
+            (s.assigned_to && (
+              String(s.assigned_to).toLowerCase() === String(userEmpCode).toLowerCase() ||
+              String((s as any).assigned_emp_code).toLowerCase() === String(userEmpCode).toLowerCase()
+            ));
           return isNotCompleted && isAssigned;
         });
       }

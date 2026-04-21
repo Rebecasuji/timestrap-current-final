@@ -2,15 +2,15 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import { promises as fs } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { pool } from './db';
-import { pmsPool, saveSiteReportToPMS } from './pmsSupabase';
-import { getLMSHours } from './lmsSupabase';
+import { promises as fs } from "fs";
+import path from "path";   // ✅ KEEP THIS
+import { pool } from "./db";
+import { pmsPool, saveSiteReportToPMS } from "./pmsSupabase";
+import { getLMSHours } from "./lmsSupabase";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// ✅ REPLACE WITH THIS (WORKS IN PM2 + CJS)
+const __dirname = path.resolve();
+
 import {
   insertOrganisationSchema,
   insertEmployeeSchema,
@@ -22,8 +22,8 @@ import {
   dailyPlans,
   planTasks,
 } from "@shared/schema";
-import { createClient } from '@supabase/supabase-js';
 
+import { createClient } from "@supabase/supabase-js";
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_SERVICE_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -436,7 +436,7 @@ export async function registerRoutes(
       const rows = result && result.rows ? result.rows : [];
       res.json(rows);
     } catch (error) {
-      console.error('Get key steps error:', error);
+      console.error('❌ Get key steps error for projectId:', projectId, error);
       res.status(500).json([]);
     }
   });
