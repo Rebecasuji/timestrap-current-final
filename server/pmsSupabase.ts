@@ -12,6 +12,12 @@ export const pmsPool = new Pool({
   }
 });
 
+// Log which PMS database we are connecting to (masked for security)
+if (pmsDatabaseUrl) {
+  const maskedUrl = pmsDatabaseUrl.replace(/:[^:@]+@/, ':****@');
+  console.log(`🔌 PMS Database initialized with host: ${maskedUrl.split('@')[1]?.split('/')[0] || 'Unknown'}`);
+}
+
 // PMS Project interface matching Supabase schema
 export interface PMSProject {
   id: string;
@@ -228,7 +234,15 @@ export const getProjects = async (userRole?: string, userEmpCode?: string, userD
 export const getTasks = async (projectId?: string, userDepartment?: string, userEmpCode?: string, userRole?: string): Promise<PMSTask[]> => {
   try {
     console.log("📡 Executing PMS getTasks query for project:", projectId, "userRole:", userRole, "userEmpCode:", userEmpCode);
-    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001' || userEmpCode === 'E0046' || userEmpCode === 'E0002' || userEmpCode === 'E0048';
+    
+    // Check if user is an admin or specifically authorized
+    const isAdmin = userRole === 'admin' || 
+                    userEmpCode === 'E0001' || 
+                    userEmpCode === 'E0046' || 
+                    userEmpCode === 'E0002' || 
+                    userEmpCode === 'E0048';
+    
+    console.log(`📋 getTasks auth context: isAdmin=${isAdmin}, userEmpCode=${userEmpCode}, userRole=${userRole}, projectCode=${projectId}`);
 
     let query = 'SELECT * FROM project_tasks ORDER BY task_name';
     const params: any[] = [];

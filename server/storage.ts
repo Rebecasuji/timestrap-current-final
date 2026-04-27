@@ -1,5 +1,5 @@
 import { db, pool } from "./db";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, gte, lte } from "drizzle-orm";
 import {
   organisations,
   employees,
@@ -11,9 +11,12 @@ import {
   tasks,
   subtasks,
   discussions,
-  siteReports,
-  siteReportAttachments,
-  // <-- corrected
+  dailySubmissions,
+  dailyPlanSettings,
+  alerts,
+  type Alert,
+  type InsertAlert,
+  type DailyPlanSettings,
   type Organisation,
   type InsertOrganisation,
   type Employee,
@@ -41,6 +44,9 @@ import {
   type InsertDailyPlan,
   type PlanTask,
   type InsertPlanTask,
+  dailySubmissions,
+  type DailySubmission,
+  type InsertDailySubmission,
 } from "@shared/schema";
 import { getProjects as getPMSProjects, getTasks as getPMSTasks, getTasksByProject as getPMSTasksByProject, getSubtasks as getPMSSubtasks, type PMSProject, type PMSTask, type PMSSubtask } from "./pmsSupabase";
 import bcrypt from "bcryptjs";
@@ -106,6 +112,7 @@ export interface IStorage {
   getTimeEntriesByEmployeeAndDate(employeeId: string, date: string): Promise<TimeEntry[]>;
   // Added for EOD reports — fetch ALL entries for a given date across all employees
   getTimeEntriesByDate(date: string): Promise<TimeEntry[]>;
+  getTimeEntriesByDateRange(startDate: string, endDate: string): Promise<TimeEntry[]>;
   getPendingTimeEntries(): Promise<TimeEntry[]>;
   createTimeEntry(entry: InsertTimeEntry): Promise<TimeEntry>;
   updateTimeEntry(id: string, data: Partial<InsertTimeEntry>): Promise<TimeEntry | undefined>;
@@ -142,8 +149,15 @@ export interface IStorage {
   createPlanTask(data: InsertPlanTask): Promise<PlanTask>;
   getPlanTasks(planId: string): Promise<PlanTask[]>;
   getPlanTasksByEmployeeAndDate(employeeId: string, date: string): Promise<PlanTask[]>;
+  getBatchPlanTasksByDateRange(startDate: string, endDate: string): Promise<any[]>;
   updatePlanTask(id: string, updates: Partial<InsertPlanTask>): Promise<PlanTask | undefined>;
   getAllDailyPlans(): Promise<DailyPlan[]>;
+
+  // Daily Submissions
+  createDailySubmission(data: InsertDailySubmission): Promise<DailySubmission>;
+  getDailySubmissionByDate(employeeId: string, date: string): Promise<DailySubmission | undefined>;
+  getDailySubmissionsByDate(date: string): Promise<DailySubmission[]>;
+  getDailySubmissionsByDateRange(startDate: string, endDate: string): Promise<DailySubmission[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -422,9 +436,16 @@ export class DatabaseStorage implements IStorage {
 
   // fetch ALL entries for a specific date across all employees (used by EOD Reports)
   async getTimeEntriesByDate(date: string): Promise<TimeEntry[]> {
-    return await db.select().from(timeEntries)
-      .where(eq(timeEntries.date, date))
-      .orderBy(timeEntries.employeeId, timeEntries.startTime);
+    return await db.select().from(timeEntries).where(eq(timeEntries.date, date));
+  }
+
+  async getTimeEntriesByDateRange(startDate: string, endDate: string): Promise<TimeEntry[]> {
+    return await db.select().from(timeEntries).where(
+      and(
+        gte(timeEntries.date, startDate),
+        lte(timeEntries.date, endDate)
+      )
+    );
   }
 
   async getPendingTimeEntries(): Promise<TimeEntry[]> {
@@ -759,6 +780,80 @@ export class DatabaseStorage implements IStorage {
 
   async getAllDailyPlans(): Promise<DailyPlan[]> {
     return await db.select().from(dailyPlans).orderBy(desc(dailyPlans.date));
+  }
+
+  // Daily Submissions
+  async createDailySubmission(data: InsertDailySubmission): Promise<DailySubmission> {
+    const [submission] = await db.insert(dailySubmissions).values(data).returning();
+    return submission;
+  }
+
+  async getDailySubmissionByDate(employeeId: string, date: string): Promise<DailySubmission | undefined> {
+    const [submission] = await db.select().from(dailySubmissions).where(
+      and(eq(dailySubmissions.employeeId, employeeId), eq(dailySubmissions.date, date))
+    );
+    return submission;
+  }
+
+  async getDailySubmissionsByDate(date: string): Promise<DailySubmission[]> {
+    return await db.select().from(dailySubmissions).where(eq(dailySubmissions.date, date));
+  }
+
+  async getDailySubmissionsByDateRange(startDate: string, endDate: string): Promise<DailySubmission[]> {
+    return await db.select().from(dailySubmissions).where(
+      and(
+        gte(dailySubmissions.date, startDate),
+        lte(dailySubmissions.date, endDate)
+      )
+    );
+  }
+
+  async getBatchPlanTasksByDateRange(startDate: string, endDate: string): Promise<any[]> {
+    try {
+      const q = await db.select()
+        .from(planTasks)
+        .innerJoin(dailyPlans, eq(planTasks.planId, dailyPlans.id))
+        .where(
+          and(
+            gte(dailyPlans.date, startDate),
+            lte(dailyPlans.date, endDate)
+          )
+        );
+      
+      return q;
+    } catch (error) {
+      console.error("Error batch getting plan tasks:", error);
+      return [];
+    }
+  }
+
+  // Alerts
+  async createAlert(data: InsertAlert): Promise<Alert> {
+    const [alert] = await db.insert(alerts).values(data).returning();
+    return alert;
+  }
+
+  async getAlertsByEmployee(employeeId: string): Promise<Alert[]> {
+    return await db.select().from(alerts).where(eq(alerts.employeeId, employeeId)).orderBy(desc(alerts.createdAt));
+  }
+
+  async markAlertAsRead(id: string): Promise<void> {
+    await db.update(alerts).set({ isRead: true }).where(eq(alerts.id, id));
+  }
+
+  // Daily Plan Settings
+  async setDailyPlanClosed(date: string, isClosed: boolean): Promise<void> {
+    await db.insert(dailyPlanSettings)
+      .values({ date, isClosed, closedAt: isClosed ? new Date() : null })
+      .onConflictDoUpdate({
+        target: dailyPlanSettings.date,
+        set: { isClosed, closedAt: isClosed ? new Date() : null }
+      });
+  }
+
+  async isDailyPlanClosed(date: string): Promise<boolean> {
+    const [settings] = await db.select().from(dailyPlanSettings).where(eq(dailyPlanSettings.date, date));
+    return settings?.isClosed || false;
   }
 }
 

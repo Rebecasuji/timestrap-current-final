@@ -3,6 +3,7 @@ import { Badge } from '@/components/ui/badge';
 import { LogOut, Menu, Calendar } from 'lucide-react';
 import { User, UserRole } from '@/context/AuthContext';
 import logoImage from '@assets/WhatsApp_Image_2025-11-11_at_11.06.02_AM_1765464690595.jpeg';
+import AlertsPopover from './AlertsPopover';
 
 interface AppHeaderProps {
   user: User;
@@ -102,6 +103,8 @@ export default function AppHeader({
         >
           {roleLabels[user.role]}
         </Badge>
+
+        <AlertsPopover employeeId={user.id} />
         
         <Button 
           size="icon" 

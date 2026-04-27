@@ -23,6 +23,7 @@ import TaskEntryPage from '@/pages/TaskEntryPage';
 import SiteEngineerTimesheet from '@/pages/SiteEngineerTimesheet';
 import RejectionsPage from '@/pages/RejectionsPage';
 import EODReportsPage from '@/pages/EODReportsPage';
+import MissingReportsPage from '@/pages/MissingReportsPage';
 import MascotDolls from '@/components/MascotDolls';
 import PostponementsPage from '@/pages/admin/PostponementsPage';
 import DiscussionPage from '@/pages/DiscussionPage';
@@ -119,9 +120,14 @@ function AuthenticatedApp() {
                 <RejectionsPage user={user} />
               </Route>
               {(user.role === 'manager' || user.role === 'hr' || user.role === 'admin') && (
-                <Route path="/eod-reports">
-                  <EODReportsPage user={user} />
-                </Route>
+                <>
+                  <Route path="/eod-reports">
+                    <EODReportsPage user={user} />
+                  </Route>
+                  <Route path="/missing-reports">
+                    <MissingReportsPage user={user} />
+                  </Route>
+                </>
               )}
               <Route path="/site-timesheet">
                 <SiteEngineerTimesheet />

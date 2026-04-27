@@ -139,12 +139,22 @@ export default function TrackerPage({ user }: TrackerPageProps) {
   const { data: dailyPlanStatus } = useQuery({
     queryKey: ['/api/daily-plans/today', user.id, formattedDate],
     queryFn: async () => {
-      // Only check for today or past days if relevant, but typically "Plan for the Day" is for "today"
       const res = await fetch(`/api/daily-plans/today/${user.id}`);
       if (!res.ok) return { submitted: false };
       return res.json();
     },
     enabled: !!user?.id && formattedDate === format(new Date(), 'yyyy-MM-dd'),
+  });
+
+  // Check if daily submission is already made
+  const { data: dailySubmission } = useQuery({
+    queryKey: ['/api/daily-submission', user.id, formattedDate],
+    queryFn: async () => {
+      const res = await fetch(`/api/daily-submission?employeeId=${user.id}&date=${formattedDate}`);
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: !!user?.id,
   });
 
   const checkPlanAndNavigate = (targetUrl: string) => {
@@ -500,13 +510,19 @@ export default function TrackerPage({ user }: TrackerPageProps) {
   // Debug log for LMS
   console.log(`[LMS Debug] Code: ${user?.employeeCode}, Date: ${formattedDate}, Hours: ${lmsHours}, Minutes: ${lmsMinutes}, Total: ${totalCombinedMinutes}`);
 
-  const alreadySubmittedToday = todaysEntries.some(e => e.date === formattedDate && (e.status === 'pending' || e.status === 'approved'));
+  const alreadySubmittedToday = !!dailySubmission;
 
-  // Allow submission if there are pending (draft) tasks, regardless of previous submissions
+  // Allow submission if there are pending (draft) tasks, 
+  // AND total hours (Worked + LMS) >= 8 hours
+  // AND not already submitted
+  const REQUIRED_MINUTES = 8 * 60;
+  const hasEnoughHours = totalCombinedMinutes >= REQUIRED_MINUTES;
+
   const canSubmit =
     !isSubmitting &&
+    !alreadySubmittedToday &&
     pendingTasks.length > 0 &&
-    totalCombinedMinutes > 0;
+    hasEnoughHours;
 
 
   const handleSaveTask = async (taskData: Task) => {
@@ -1072,11 +1088,18 @@ export default function TrackerPage({ user }: TrackerPageProps) {
               {pendingTasks.length > 0 && (
                 <div className="flex items-center gap-2">
                   <Send className="w-5 h-5 text-yellow-400" />
-                  <span className="text-yellow-200">
-                    {alreadySubmittedToday 
-                      ? "Some tasks already submitted for today. You can still submit additional drafts." 
-                      : `${pendingTasks.length} task${pendingTasks.length > 1 ? 's' : ''} pending submission`}
-                  </span>
+                  <div className="flex flex-col">
+                    <span className="text-yellow-200">
+                      {alreadySubmittedToday 
+                        ? "You have already made a final submission for today." 
+                        : `${pendingTasks.length} task${pendingTasks.length > 1 ? 's' : ''} pending submission`}
+                    </span>
+                    {!hasEnoughHours && !alreadySubmittedToday && (
+                      <span className="text-xs text-rose-400 font-bold animate-pulse">
+                        ⚠️ Minimum 8 hours required (Worked + Leave) to Final Submit. Current: {formatDuration(totalCombinedMinutes)}
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

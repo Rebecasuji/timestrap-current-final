@@ -7,6 +7,7 @@ import path from "path";   // ✅ KEEP THIS
 import { pool } from "./db";
 import { pmsPool, saveSiteReportToPMS } from "./pmsSupabase";
 import { getLMSHours } from "./lmsSupabase";
+import { format, parseISO, eachDayOfInterval, isSameDay } from "date-fns";
 
 // ✅ REPLACE WITH THIS (WORKS IN PM2 + CJS)
 const __dirname = path.resolve();
@@ -564,7 +565,21 @@ export async function registerRoutes(
         }
 
         if (!isPlanned && (entryData.pmsId || entryData.pmsSubtaskId)) {
-           return res.status(403).json({ error: "This task is not part of today's plan. Please add it as a deviation first." });
+           // Instead of blocking, we automatically add it as a deviation
+           console.log(`[TIME-ENTRY] Task ${entryData.pmsId || entryData.pmsSubtaskId} not in plan. Adding as auto-deviation.`);
+           try {
+             await storage.createPlanTask({
+               planId: plan.id,
+               taskId: entryData.pmsId || entryData.pmsSubtaskId || 'unplanned',
+               projectName: entryData.projectName,
+               taskName: entryData.taskDescription,
+               isDeviation: true,
+               deviationReason: "Automatically added via timesheet submission",
+               status: 'approved'
+             });
+           } catch (devErr) {
+             console.error("[TIME-ENTRY] Failed to auto-create deviation:", devErr);
+           }
         }
       }
 
@@ -732,11 +747,21 @@ export async function registerRoutes(
       const totalLMSMinutes = Math.round(lmsData.totalLMSHours * 60);
       const combinedMinutes = totalMinutes + totalLMSMinutes;
 
-      // Relaxed rule: allow submission as long as there is some work recorded
-      if (combinedMinutes <= 0) {
+      // 1. Check if already submitted
+      const existingSubmission = await storage.getDailySubmissionByDate(employeeId, date);
+      if (existingSubmission) {
         return res.status(400).json({ 
-          error: "No hours recorded", 
-          message: `You must have at least some recorded hours to submit.`,
+          error: "Already Submitted", 
+          message: `You have already made a final submission for ${date}.` 
+        });
+      }
+
+      // 2. Working Hours Validation (Enforce 8 hours)
+      const REQUIRED_MINUTES = 8 * 60; // 8 hours
+      if (combinedMinutes < REQUIRED_MINUTES) {
+        return res.status(400).json({ 
+          error: "Insufficient hours", 
+          message: `Total working hours (Timesheet + Leave/Permission) must be at least 8 hours. Current total: ${formatDuration(combinedMinutes)}`,
           workMinutes: totalMinutes,
           lmsMinutes: totalLMSMinutes,
           totalMinutes: combinedMinutes
@@ -744,6 +769,13 @@ export async function registerRoutes(
       }
 
       const totalHoursFormatted = formatDuration(totalMinutes);
+
+      // Save the daily submission record
+      await storage.createDailySubmission({
+        employeeId,
+        date,
+        totalHours: totalHoursFormatted
+      });
 
       // use the raw entries as tasks so the email helper has full data
       const tasks = dailyEntries;
@@ -800,6 +832,20 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Submit daily summary error:", error);
       res.status(500).json({ error: "Failed to submit daily summary" });
+    }
+  });
+
+  app.get("/api/daily-submission", async (req, res) => {
+    try {
+      const { employeeId, date } = req.query;
+      if (!employeeId || !date) {
+        return res.status(400).json({ error: "Missing employeeId or date" });
+      }
+      const submission = await storage.getDailySubmissionByDate(employeeId as string, date as string);
+      res.json(submission || null);
+    } catch (error) {
+      console.error("Error fetching daily submission:", error);
+      res.status(500).json({ error: "Internal Server Error" });
     }
   });
 
@@ -1643,7 +1689,14 @@ export async function registerRoutes(
   // ---- Plan Window Control (E0046 only) ----
   app.get("/api/plan-window", async (_req, res) => {
     const settings = await readSettings();
-    res.json({ planWindowOpen: !!settings.planWindowOpen });
+    const today = format(new Date(), "yyyy-MM-dd");
+    const isAutomatedClosed = await storage.isDailyPlanClosed(today);
+    
+    // Portal is open ONLY if manual setting is open AND it hasn't been automated closed
+    res.json({ 
+      planWindowOpen: !!settings.planWindowOpen && !isAutomatedClosed,
+      isAutomatedClosed
+    });
   });
 
   app.patch("/api/plan-window", async (req, res) => {
@@ -1690,13 +1743,17 @@ export async function registerRoutes(
   app.post("/api/daily-plans", async (req, res) => {
     try {
       const { employeeId, date, selectedTasks, unselectedTasks } = req.body;
-
       const now = new Date();
-      // Plan window is always open unless explicitly restricted by other future logic
-      // Removing the 9:00 AM - 12:00 PM restriction as requested
-      const isInTimeWindow = true; 
-
       const planDate = date || now.toISOString().split('T')[0];
+
+      // Check if daily plan is closed for this date
+      const isClosed = await storage.isDailyPlanClosed(planDate);
+      if (isClosed) {
+        return res.status(403).json({ error: "Daily plan submission is closed for today (portal closes at 12:00 PM)." });
+      }
+
+      // Plan window is always open unless explicitly restricted by other future logic
+      const isInTimeWindow = true; 
       let plan;
       const existingPlan = await storage.getDailyPlanByDate(employeeId, planDate);
       
@@ -2191,37 +2248,43 @@ export async function registerRoutes(
     try {
       const { date, startDate, endDate } = req.query;
       
-      let entriesForDate: any[] = [];
       let targetDates: string[] = [];
+      let rangeStart: string;
+      let rangeEnd: string;
 
       if (startDate && endDate) {
-        // Range mode
-        const start = new Date(startDate as string);
-        const end = new Date(endDate as string);
-        const diffDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-        
-        for (let i = 0; i <= diffDays; i++) {
-          const d = new Date(start);
-          d.setDate(start.getDate() + i);
-          targetDates.push(d.toISOString().split('T')[0]);
-        }
-
-        // Fetch entries for all dates in range
-        const allEntries = await Promise.all(targetDates.map(d => storage.getTimeEntriesByDate(d)));
-        entriesForDate = allEntries.flat();
+        rangeStart = startDate as string;
+        rangeEnd = endDate as string;
+        const start = parseISO(rangeStart);
+        const end = parseISO(rangeEnd);
+        targetDates = eachDayOfInterval({ start, end }).map(d => format(d, 'yyyy-MM-dd'));
       } else if (date) {
-        // Single date mode
+        rangeStart = date as string;
+        rangeEnd = date as string;
         targetDates = [date as string];
-        entriesForDate = await storage.getTimeEntriesByDate(date as string);
       } else {
         return res.status(400).json({ error: "Date or date range is required" });
       }
 
-      const allEmployees = await storage.getEmployees();
+      const { getBatchLMSHours } = await import('./lmsSupabase');
+
+      // Optimization: Batch fetch all required data in parallel
+      const [
+        allEmployees,
+        flatEntries,
+        flatSubs,
+        batchLMS,
+        batchPlanTasks
+      ] = await Promise.all([
+        storage.getEmployees(),
+        storage.getTimeEntriesByDateRange(rangeStart, rangeEnd),
+        storage.getDailySubmissionsByDateRange(rangeStart, rangeEnd),
+        getBatchLMSHours(rangeStart, rangeEnd),
+        storage.getBatchPlanTasksByDateRange(rangeStart, rangeEnd)
+      ]);
       
       const parseDurationToMinutes = (duration: string): number => {
         if (!duration) return 0;
-        // Handle "9h 44m", "9.7", or "09:44" formats
         const hMatch = duration.match(/(\d+)h/);
         const mMatch = duration.match(/(\d+)m/);
         const colonMatch = duration.match(/(\d+):(\d+)/);
@@ -2233,38 +2296,73 @@ export async function registerRoutes(
         } else if (colonMatch) {
           return parseInt(colonMatch[1], 10) * 60 + parseInt(colonMatch[2], 10);
         }
-        
-        // Fallback for just digits (assuming hours)
         const digits = parseFloat(duration);
         if (!isNaN(digits)) return digits * 60;
-        
         return 0;
       };
 
       const finalReport: any[] = [];
 
       for (const dStr of targetDates) {
-        const dateEntries = entriesForDate.filter(e => e.date === dStr);
+        const dateEntries = flatEntries.filter(e => e.date === dStr);
+        const dailySubs = flatSubs.filter(s => s.date === dStr);
         
-        allEmployees.forEach(emp => {
-          // Robust matching: match by internal ID OR stable Employee Code (handles Admin accounts better)
+        for (const emp of allEmployees) {
+          if (emp.role === 'admin' && emp.employeeCode === 'ADMIN') continue; 
+
+          // Check batch LMS data
+          const lmsData = batchLMS[emp.employeeCode]?.[dStr] || {
+            leaveHours: 0,
+            permissionHours: 0,
+            totalLMSHours: 0,
+            details: { leaves: [], permissions: [] }
+          };
+          
+          const hasLeave = lmsData.leaveHours >= 4; 
+          const isFullLeave = lmsData.leaveHours >= 8;
+
+          // Check if final submitted
+          const isFinalSubmitted = dailySubs.some(s => s.employeeId === emp.id);
+
           const empEntries = dateEntries.filter(e => 
             e.employeeId === emp.id || 
             (e.employeeCode && e.employeeCode.toUpperCase() === emp.employeeCode.toUpperCase())
           );
+
+          // Get planned projects from batchPlanTasks
+          let plannedProjects: string[] = [];
+          if (empEntries.length === 0) {
+            const empPlanTasks = batchPlanTasks.filter(pt => 
+              pt.daily_plans.employeeId === emp.id && 
+              pt.daily_plans.date === dStr
+            );
+            plannedProjects = Array.from(new Set(empPlanTasks.map(pt => pt.plan_tasks.projectName)));
+          }
           
           const totalMinutes = empEntries.reduce((sum, entry) => sum + parseDurationToMinutes(entry.totalHours), 0);
           const totalHours = totalMinutes / 60;
           
+          const isSunday = parseISO(dStr).getDay() === 0;
+          
           let status = "Not Submitted";
-          if (empEntries.length > 0) {
-            status = totalHours >= 8 ? "Submitted" : "Incomplete";
+          if (isFinalSubmitted) {
+            status = "Submitted";
+          } else if (isFullLeave) {
+            status = "On Leave";
+          } else if (empEntries.length > 0) {
+            status = "Incomplete";
+          } else if (hasLeave) {
+            status = "On Leave"; 
+          } else if (isSunday) {
+            status = "Sunday";
           }
 
           let remark = "";
-          if (status === "Submitted") remark = "Full shift completed and submitted.";
-          else if (status === "Incomplete") remark = `Partial submission: ${totalHours.toFixed(1)} hours logged.`;
-          else remark = "No timesheet entries found for this date.";
+          if (status === "Submitted") remark = "Final timesheet submitted.";
+          else if (status === "Sunday") remark = "Weekly Holiday (Sunday).";
+          else if (status === "On Leave") remark = `Employee on approved leave (${lmsData.leaveHours}h).`;
+          else if (status === "Incomplete") remark = `Draft entries exist (${totalHours.toFixed(1)}h), but final submission missing.`;
+          else remark = "No timesheet entries or leave found.";
 
           finalReport.push({
             employeeId: emp.id,
@@ -2275,17 +2373,38 @@ export async function registerRoutes(
             date: dStr,
             status,
             workingHours: totalHours.toFixed(1),
+            lmsHours: (lmsData.totalLMSHours || 0).toFixed(1),
             requiredHours: 8,
             remark,
-            entries: empEntries
+            entries: empEntries,
+            plannedProjects
           });
-        });
+        }
       }
 
       res.json(finalReport);
     } catch (error) {
       console.error("EOD Report error:", error);
       res.status(500).json({ error: "Failed to fetch EOD report" });
+    }
+  });
+
+  // ============ ALERTS ROUTES ============
+  app.get("/api/alerts/:employeeId", async (req, res) => {
+    try {
+      const alerts = await storage.getAlertsByEmployee(req.params.employeeId);
+      res.json(alerts);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch alerts" });
+    }
+  });
+
+  app.post("/api/alerts/:id/read", async (req, res) => {
+    try {
+      await storage.markAlertAsRead(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to mark alert as read" });
     }
   });
 

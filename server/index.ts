@@ -1,4 +1,5 @@
 // ✅ MUST be first — loads .env before any other imports
+// Triggering migration restart
 import "dotenv/config";
 
 // ✅ Bypass SSL certificate validation for development (fixes SELF_SIGNED_CERT_IN_CHAIN)
@@ -8,6 +9,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { createServer } from "http";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { initScheduler } from "./scheduler";
 
 // ✅ NEW IMPORT (PMS Supabase Integration)
 import { getProjects, getTasks } from "./pmsSupabase";
@@ -96,6 +98,9 @@ app.use((req, res, next) => {
     } catch (migErr) {
       console.error("❌ Migration failed:", migErr);
     }
+
+    // Initialize Scheduler
+    initScheduler();
 
     // Register API routes
     try {

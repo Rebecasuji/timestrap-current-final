@@ -232,7 +232,7 @@ export default function PlanForDayPage() {
     });
   };
 
-  const isWindowOpen = true; // No longer restricted by 9-12 AM window
+  const isWindowOpen = !!windowData?.planWindowOpen;
 
   const isAlreadySubmittedAndBlocked = planStatus?.submitted && !planWindowOpen;
 

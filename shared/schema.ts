@@ -335,6 +335,14 @@ export const dailyPlans = pgTable("daily_plans", {
   submittedAt: timestamp("submitted_at").defaultNow().notNull(),
 });
 
+export const dailySubmissions = pgTable("daily_submissions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  employeeId: varchar("employee_id").notNull(),
+  date: text("date").notNull(), // yyyy-mm-dd
+  totalHours: text("total_hours").notNull(),
+  submittedAt: timestamp("submitted_at").defaultNow().notNull(),
+});
+
 export const planTasks = pgTable("plan_tasks", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   planId: varchar("plan_id").notNull(),
@@ -359,6 +367,47 @@ export type DailyPlan = typeof dailyPlans.$inferSelect;
 export type InsertDailyPlan = z.infer<typeof insertDailyPlanSchema>;
 export type PlanTask = typeof planTasks.$inferSelect;
 export type InsertPlanTask = z.infer<typeof insertPlanTaskSchema>;
+
+export const insertDailySubmissionSchema = createInsertSchema(dailySubmissions).omit({
+  id: true,
+  submittedAt: true,
+});
+
+export type DailySubmission = typeof dailySubmissions.$inferSelect;
+export type InsertDailySubmission = z.infer<typeof insertDailySubmissionSchema>;
+
+/* -------------------------------------------------------------------------- */
+/*                                   Alerts                                    */
+/* -------------------------------------------------------------------------- */
+export const alerts = pgTable("alerts", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  employeeId: varchar("employee_id").notNull(),
+  type: text("type").notNull(), // e.g., 'missing_submission', 'late_submission'
+  message: text("message").notNull(),
+  date: text("date"),
+  isRead: boolean("is_read").default(false).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAlertSchema = createInsertSchema(alerts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type Alert = typeof alerts.$inferSelect;
+export type InsertAlert = z.infer<typeof insertAlertSchema>;
+
+/* -------------------------------------------------------------------------- */
+/*                            Daily Plan Settings                              */
+/* -------------------------------------------------------------------------- */
+export const dailyPlanSettings = pgTable("daily_plan_settings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  date: text("date").notNull().unique(), // yyyy-mm-dd
+  isClosed: boolean("is_closed").default(false).notNull(),
+  closedAt: timestamp("closed_at"),
+});
+
+export type DailyPlanSettings = typeof dailyPlanSettings.$inferSelect;
 
 export const DEPARTMENT_OPTIONS = [
   "Software",

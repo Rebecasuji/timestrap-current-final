@@ -35,6 +35,28 @@ export async function runMigrations() {
       deviation_reason TEXT,
       status TEXT DEFAULT 'approved'
     )`,
+    `CREATE TABLE IF NOT EXISTS daily_submissions (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      employee_id VARCHAR NOT NULL,
+      date TEXT NOT NULL,
+      total_hours TEXT NOT NULL,
+      submitted_at TIMESTAMP DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS alerts (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      employee_id VARCHAR NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      date TEXT,
+      is_read BOOLEAN DEFAULT false NOT NULL,
+      created_at TIMESTAMP DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS daily_plan_settings (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      date TEXT NOT NULL UNIQUE,
+      is_closed BOOLEAN DEFAULT false NOT NULL,
+      closed_at TIMESTAMP
+    )`,
   ];
 
   for (const sql of migrations) {

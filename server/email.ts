@@ -765,33 +765,119 @@ export async function sendDailyPlanSubmittedEmail(data: {
   return await sendEmail({ to: NOTIFICATION_RECIPIENTS, subject, html });
 }
 
-export async function sendDailyPlanReminderEmail(data: { recipients: string[] }) {
-  const { recipients } = data;
-  const subject = `📢 Morning Reminder: Submit your Plan for the Day`;
+export async function sendDailyPlanReminderEmail(data: { recipients: string[], pendingTasks?: string[] }) {
+  const { recipients, pendingTasks = [] } = data;
+  const subject = `📢 Morning Reminder: Submit your Plan for the Day - ${format(new Date(), 'dd MMM yyyy')}`;
   
+  const taskListHtml = pendingTasks.length > 0 
+    ? `
+      <div style="margin: 20px 0; padding: 15px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; text-align: left;">
+        <p style="margin-top: 0; font-weight: bold; color: #92400e;">📌 Your Pending Tasks:</p>
+        <ul style="margin-bottom: 0; padding-left: 20px; color: #475569;">
+          ${pendingTasks.slice(0, 5).map(t => `<li>${t}</li>`).join('')}
+          ${pendingTasks.length > 5 ? '<li>...and more</li>' : ''}
+        </ul>
+      </div>
+    `
+    : '';
+
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 2px solid #3b82f6; border-radius: 12px; background-color: #f8fafc;">
-      <div style="text-align: center; margin-bottom: 24px;">
-        <h1 style="color: #1e3a8a; margin: 0; font-size: 24px;">Plan for the Day Reminder</h1>
-        <p style="color: #64748b; font-size: 16px;">Don't forget to capture your objectives!</p>
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
+      <div style="text-align: center; margin-bottom: 24px; padding: 20px; background: linear-gradient(135deg, #3b82f6 0%, #1e3a8a 100%); border-radius: 12px; color: white;">
+        <h1 style="margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em;">Morning Reminder ☀️</h1>
+        <p style="margin-top: 8px; opacity: 0.9;">Time to set your objectives for today!</p>
       </div>
       
-      <div style="background-color: #ffffff; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; text-align: center;">
-        <p style="font-size: 18px; color: #0f172a; font-weight: bold; margin-bottom: 16px;">
-          The Daily Plan portal will close at <span style="color: #ef4444;">12:00 PM</span> sharp today.
+      <div style="padding: 10px; text-align: center;">
+        <p style="font-size: 16px; color: #334155; line-height: 1.6;">
+          Hi there! This is a friendly reminder to submit your <strong>Plan for the Day</strong>.
         </p>
-        <p style="color: #475569; line-height: 1.5; margin-bottom: 24px;">
-          Starting your day with a clear plan helps you stay focused and ensures your tasks are tracked accurately for approval.
-        </p>
+        
+        ${taskListHtml}
+        
+        <div style="margin: 24px 0; padding: 16px; background-color: #fef2f2; border-radius: 12px; border: 1px solid #fee2e2;">
+          <p style="margin: 0; color: #991b1b; font-weight: bold; font-size: 14px;">
+            ⚠️ Submission closes at 12:00 PM Today
+          </p>
+        </div>
+
+        <div style="margin-top: 32px;">
+          <a href="${process.env.APP_URL || 'http://localhost:5000'}/plan-for-today" 
+             style="display: inline-block; background-color: #2563eb; color: white; padding: 14px 32px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.39);">
+             Start My Day Plan →
+          </a>
+        </div>
       </div>
       
-      <div style="margin-top: 24px; text-align: center; color: #94a3b8; font-size: 12px;">
-        <p>This is an automated reminder from Time Strap. Good luck with your tasks today!</p>
+      <div style="margin-top: 40px; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+        <p style="color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;">
+          Time Strap Automated System
+        </p>
       </div>
     </div>
   `;
 
   console.log(`[ALERT EMAIL] Sending reminder to ${recipients.length} employees`);
+  return await sendEmail({ to: recipients, subject, html });
+}
+
+export async function sendEODSummaryReportEmail(data: { 
+  recipients: string[], 
+  date: string, 
+  summary: { total: number, submitted: number, missing: number, onLeave: number },
+  reportRows: string 
+}) {
+  const { recipients, date, summary, reportRows } = data;
+  const subject = `📊 EOD Summary Report - ${date}`;
+  
+  const html = `
+    <div style="font-family: sans-serif; max-width: 800px; margin: 0 auto; color: #1e293b; background-color: #f8fafc; padding: 40px; border-radius: 24px;">
+      <div style="margin-bottom: 32px;">
+        <h2 style="color: #0f172a; margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.025em;">Daily EOD Summary</h2>
+        <p style="color: #64748b; font-size: 16px; margin-top: 4px;">Status report for ${date}</p>
+      </div>
+
+      <div style="display: flex; gap: 16px; margin-bottom: 32px;">
+        <div style="flex: 1; background: white; padding: 16px; border-radius: 16px; border: 1px solid #e2e8f0; text-align: center;">
+          <p style="margin: 0; font-size: 12px; color: #64748b; font-weight: 700; text-transform: uppercase;">Total</p>
+          <p style="margin: 4px 0 0 0; font-size: 24px; font-weight: 800; color: #0f172a;">${summary.total}</p>
+        </div>
+        <div style="flex: 1; background: white; padding: 16px; border-radius: 16px; border: 1px solid #e2e8f0; text-align: center;">
+          <p style="margin: 0; font-size: 12px; color: #64748b; font-weight: 700; text-transform: uppercase;">Submitted</p>
+          <p style="margin: 4px 0 0 0; font-size: 24px; font-weight: 800; color: #16a34a;">${summary.submitted}</p>
+        </div>
+        <div style="flex: 1; background: white; padding: 16px; border-radius: 16px; border: 1px solid #e2e8f0; text-align: center;">
+          <p style="margin: 0; font-size: 12px; color: #64748b; font-weight: 700; text-transform: uppercase;">Missing</p>
+          <p style="margin: 4px 0 0 0; font-size: 24px; font-weight: 800; color: #ef4444;">${summary.missing}</p>
+        </div>
+        <div style="flex: 1; background: white; padding: 16px; border-radius: 16px; border: 1px solid #e2e8f0; text-align: center;">
+          <p style="margin: 0; font-size: 12px; color: #64748b; font-weight: 700; text-transform: uppercase;">On Leave</p>
+          <p style="margin: 4px 0 0 0; font-size: 24px; font-weight: 800; color: #2563eb;">${summary.onLeave}</p>
+        </div>
+      </div>
+      
+      <div style="background: white; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden;">
+        <table style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr style="background: #f1f5f9; text-align: left;">
+              <th style="padding: 16px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase;">Employee</th>
+              <th style="padding: 16px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase;">Department</th>
+              <th style="padding: 16px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase;">Status</th>
+              <th style="padding: 16px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; text-align: center;">Hours</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${reportRows}
+          </tbody>
+        </table>
+      </div>
+      
+      <div style="margin-top: 32px; text-align: center; color: #94a3b8; font-size: 12px;">
+        <p>This report was automatically generated by the Time Strap Scheduler.</p>
+      </div>
+    </div>
+  `;
+
   return await sendEmail({ to: recipients, subject, html });
 }
 
