@@ -30,13 +30,13 @@ export default function PlanForDayPage() {
   const isController = user?.employeeCode === 'E0046';
 
   // Fetch plan window status from server
-  const { data: windowData } = useQuery({
+  const { data: windowData, refetch: refetchWindowStatus } = useQuery({
     queryKey: ['/api/plan-window'],
     queryFn: async () => {
       const res = await fetch('/api/plan-window');
       return res.json();
     },
-    refetchInterval: 10000, // poll every 10s
+    refetchInterval: 30000, // poll every 30s
   });
 
   const planWindowOpen: boolean = !!windowData?.planWindowOpen;
@@ -47,8 +47,16 @@ export default function PlanForDayPage() {
       const res = await apiRequest('PATCH', '/api/plan-window', { employeeId: user?.id, open });
       return res.json();
     },
+    onMutate: async (newOpen: boolean) => {
+      // Optimistic update - update UI immediately
+      const previousData = queryClient.getQueryData(['/api/plan-window']);
+      queryClient.setQueryData(['/api/plan-window'], { planWindowOpen: newOpen });
+      return { previousData };
+    },
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['/api/plan-window'] });
+      // Confirm the update with server response
+      queryClient.setQueryData(['/api/plan-window'], data);
+      
       toast({
         title: data.planWindowOpen ? '🟢 Plan Window Opened' : '🔴 Plan Window Closed',
         description: data.planWindowOpen
@@ -56,7 +64,13 @@ export default function PlanForDayPage() {
           : 'Submission is restricted. Please contact your administrator.',
       });
     },
-    onError: () => toast({ title: 'Failed', description: 'Could not update window.', variant: 'destructive' }),
+    onError: (error, newOpen, context: any) => {
+      // Rollback on error
+      if (context?.previousData) {
+        queryClient.setQueryData(['/api/plan-window'], context.previousData);
+      }
+      toast({ title: 'Failed', description: 'Could not update window.', variant: 'destructive' });
+    },
   });
 
   // Morning Reminder mutation (E0046, E0048 only)
@@ -66,9 +80,13 @@ export default function PlanForDayPage() {
       return res.json();
     },
     onSuccess: (data) => {
+      const description = data.failed && data.failed.length > 0
+        ? `Sent ${data.count} alert(s), but ${data.failed.length} failed. Skipped ${data.skipped || 0} who already submitted.`
+        : `Successfully sent ${data.count} reminder email(s).${data.skipped ? ` Skipped ${data.skipped} who already submitted.` : ''}`;
+      
       toast({
-        title: '✅ Morning Alerts Sent',
-        description: `Reminder email successfully sent to ${data.count} active employees.`,
+        title: '✅ Alert Emails Processed',
+        description: description,
       });
     },
     onError: (err: any) => {
@@ -87,9 +105,10 @@ export default function PlanForDayPage() {
       return res.json();
     },
     onSuccess: (data) => {
+      const totalMissed = (data.summary?.missedDailyPlan || 0) + (data.summary?.missedTimesheet || 0);
       toast({
-        title: '📊 EOD Report Generated',
-        description: `Successfully identified ${data.summary.missedDailyPlan} missed plans and ${data.summary.missedTimesheet} missed timesheets. Notifications sent.`,
+        title: '📊 EOD Report Sent',
+        description: `${totalMissed} submission issue(s) detected. Report and notifications sent to admins.`,
       });
     },
     onError: (err: any) => {
@@ -234,7 +253,11 @@ export default function PlanForDayPage() {
 
   const isWindowOpen = !!windowData?.planWindowOpen;
 
-  const isAlreadySubmittedAndBlocked = planStatus?.submitted && !planWindowOpen;
+  // Block submission if already submitted (regardless of window status)
+  const isAlreadySubmittedAndBlocked = planStatus?.submitted;
+  
+  // Show closed message if window is not open and plan hasn't been submitted
+  const isWindowClosedNotSubmitted = !isWindowOpen && !planStatus?.submitted;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6 bg-slate-950 min-h-screen text-white">
@@ -360,6 +383,40 @@ export default function PlanForDayPage() {
                 className="px-8 py-6 border-slate-700 text-white hover:bg-slate-800 rounded-xl font-semibold"
               >
                 View My List
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      ) : isWindowClosedNotSubmitted ? (
+        <div className="flex flex-col h-[calc(100vh-250px)] items-center justify-center p-8 bg-slate-950 text-center text-white">
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-slate-900/50 p-12 rounded-3xl border border-red-500/20 shadow-2xl backdrop-blur-xl max-w-lg w-full"
+          >
+            <div className="w-24 h-24 bg-red-500/10 rounded-full flex items-center justify-center border border-red-500/20 mx-auto mb-8">
+              <PowerOff className="w-12 h-12 text-red-500" />
+            </div>
+            <h1 className="text-3xl font-extrabold mb-4 bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+              Plan Window Closed
+            </h1>
+            <p className="text-slate-400 text-lg mb-8 max-w-sm mx-auto">
+              The plan submission window is currently closed. Please contact your administrator or wait for the window to reopen.
+            </p>
+
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              <Button
+                onClick={() => setLocation('/tracker')}
+                className="px-8 py-6 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-bold transition-all hover:scale-105"
+              >
+                Go to Tracker
+              </Button>
+              <Button
+                onClick={() => { setHistoryDate(today); setActiveTab('history'); }}
+                variant="outline"
+                className="px-8 py-6 border-slate-700 text-white hover:bg-slate-800 rounded-xl font-semibold"
+              >
+                View History
               </Button>
             </div>
           </motion.div>

@@ -601,33 +601,147 @@ export async function sendSiteReportEmail(data: {
   }
 }
 
-// Generic email sender
+/* ============================
+   EMAIL VALIDATION UTILITIES
+============================ */
+
+/**
+ * Validates email format
+ */
+function isValidEmail(email: string): boolean {
+  if (!email || typeof email !== 'string') return false;
+  // RFC 5322 simplified regex pattern
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email.trim()) && email.length <= 254;
+}
+
+/**
+ * Filters and validates email list
+ */
+function validateEmailList(emails: string[]): {
+  valid: string[];
+  invalid: string[];
+} {
+  const valid: string[] = [];
+  const invalid: string[] = [];
+
+  for (const email of emails) {
+    if (isValidEmail(email)) {
+      valid.push(email.trim().toLowerCase());
+    } else {
+      invalid.push(email);
+    }
+  }
+
+  return { valid, invalid };
+}
+
+/* ============================
+   GENERIC EMAIL SENDER
+============================ */
+
+/**
+ * Generic email sender with validation and retry logic
+ */
 export async function sendEmail(data: {
   to: string[];
   cc?: string[];
   subject: string;
   html: string;
+  maxRetries?: number;
 }) {
-  try {
-    const { to, cc, subject, html } = data;
-    const { data: result, error } = await resend.emails.send({
-      from: FROM_EMAIL,
-      to,
-      cc,
-      subject,
-      html
-    });
+  const { to = [], cc = [], subject, html, maxRetries = 2 } = data;
 
-    if (error) {
-      console.error("[EMAIL ERROR]", error);
-      return { success: false, error };
-    }
-    console.log("[EMAIL SENT]:", result?.id);
-    return { success: true, result };
-  } catch (err) {
-    console.error("[EMAIL ERROR]", err);            
-    return { success: false, err };
+  // Validate recipients
+  const { valid: validTo, invalid: invalidTo } = validateEmailList(to);
+  const { valid: validCc, invalid: invalidCc } = validateEmailList(cc);
+
+  if (validTo.length === 0) {
+    const errorMsg = `[EMAIL ERROR] No valid recipient emails. Invalid: ${invalidTo.join(', ')}`;
+    console.error(errorMsg);
+    return { 
+      success: false, 
+      error: "No valid recipient emails provided",
+      details: { invalidRecipients: invalidTo }
+    };
   }
+
+  if (invalidTo.length > 0) {
+    console.warn(`[EMAIL WARNING] Skipping invalid recipient emails:`, invalidTo);
+  }
+  if (invalidCc.length > 0) {
+    console.warn(`[EMAIL WARNING] Skipping invalid CC emails:`, invalidCc);
+  }
+
+  let lastError: any = null;
+  let attempt = 0;
+
+  while (attempt <= maxRetries) {
+    try {
+      attempt++;
+      console.log(`[EMAIL] Attempt ${attempt}/${maxRetries + 1}: Sending email with subject: "${subject}" to ${validTo.length} recipient(s)`);
+
+      const { data: result, error } = await resend.emails.send({
+        from: FROM_EMAIL,
+        to: validTo,
+        cc: validCc.length > 0 ? validCc : undefined,
+        subject,
+        html
+      });
+
+      if (error) {
+        lastError = error;
+        console.error(`[EMAIL ERROR] Attempt ${attempt}: ${error.message || error}`);
+        
+        if (attempt <= maxRetries) {
+          const waitTime = 1000 * Math.pow(2, attempt - 1); // exponential backoff
+          console.log(`[EMAIL] Retrying in ${waitTime}ms...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+        
+        return { 
+          success: false, 
+          error: error.message || "Email send failed",
+          details: { attempt, totalAttempts: maxRetries + 1, error }
+        };
+      }
+
+      console.log(`[EMAIL SUCCESS] Email ID: ${result?.id} | Recipients: ${validTo.join(', ')} | Subject: "${subject}"`);
+      return { 
+        success: true, 
+        result,
+        details: { 
+          emailId: result?.id,
+          recipientCount: validTo.length,
+          ccCount: validCc.length,
+          attempt
+        }
+      };
+    } catch (err: any) {
+      lastError = err;
+      console.error(`[EMAIL ERROR] Attempt ${attempt}: ${err.message || err}`);
+      
+      if (attempt <= maxRetries) {
+        const waitTime = 1000 * Math.pow(2, attempt - 1);
+        console.log(`[EMAIL] Retrying in ${waitTime}ms...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+
+      return { 
+        success: false, 
+        error: err.message || "Email send failed",
+        details: { attempt, totalAttempts: maxRetries + 1, error: err }
+      };
+    }
+  }
+
+  return { 
+    success: false, 
+    error: lastError?.message || "Email send failed after retries",
+    details: { attempt, totalAttempts: maxRetries + 1, lastError }
+  };
 }
 
 export async function sendDeviationNotificationEmail(data: {
@@ -766,59 +880,267 @@ export async function sendDailyPlanSubmittedEmail(data: {
 }
 
 export async function sendDailyPlanReminderEmail(data: { recipients: string[], pendingTasks?: string[] }) {
-  const { recipients, pendingTasks = [] } = data;
-  const subject = `📢 Morning Reminder: Submit your Plan for the Day - ${format(new Date(), 'dd MMM yyyy')}`;
+  const { recipients = [], pendingTasks = [] } = data;
+  
+  // Validate recipients
+  const { valid: validRecipients, invalid: invalidRecipients } = validateEmailList(recipients);
+  
+  if (validRecipients.length === 0) {
+    console.error(`[REMINDER EMAIL] No valid recipients. Invalid: ${invalidRecipients.join(', ')}`);
+    return { 
+      success: false, 
+      error: "No valid recipient emails",
+      details: { invalidRecipients }
+    };
+  }
+
+  const currentDate = format(new Date(), 'MMMM dd, yyyy');
+  const subject = `Action Required: Submit Your Plan for the Day - ${currentDate}`;
   
   const taskListHtml = pendingTasks.length > 0 
     ? `
-      <div style="margin: 20px 0; padding: 15px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; text-align: left;">
-        <p style="margin-top: 0; font-weight: bold; color: #92400e;">📌 Your Pending Tasks:</p>
-        <ul style="margin-bottom: 0; padding-left: 20px; color: #475569;">
-          ${pendingTasks.slice(0, 5).map(t => `<li>${t}</li>`).join('')}
-          ${pendingTasks.length > 5 ? '<li>...and more</li>' : ''}
+      <div style="margin: 24px 0; padding: 16px; background: linear-gradient(135deg, #fef3c7 0%, #fef08a 100%); border-left: 4px solid #f59e0b; border-radius: 8px;">
+        <p style="margin-top: 0; font-weight: 700; color: #92400e; font-size: 14px;">📋 Assigned Tasks Pending Review:</p>
+        <ul style="margin-bottom: 0; padding-left: 20px; color: #78350f; line-height: 1.8;">
+          ${pendingTasks.slice(0, 5).map(t => `<li style="margin-bottom: 6px;">${t}</li>`).join('')}
+          ${pendingTasks.length > 5 ? `<li style="margin-top: 8px; font-style: italic; color: #b45309;">...and ${pendingTasks.length - 5} more task(s)</li>` : ''}
         </ul>
       </div>
     `
     : '';
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
-      <div style="text-align: center; margin-bottom: 24px; padding: 20px; background: linear-gradient(135deg, #3b82f6 0%, #1e3a8a 100%); border-radius: 12px; color: white;">
-        <h1 style="margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em;">Morning Reminder ☀️</h1>
-        <p style="margin-top: 8px; opacity: 0.9;">Time to set your objectives for today!</p>
-      </div>
-      
-      <div style="padding: 10px; text-align: center;">
-        <p style="font-size: 16px; color: #334155; line-height: 1.6;">
-          Hi there! This is a friendly reminder to submit your <strong>Plan for the Day</strong>.
-        </p>
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #f9fafb; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+      <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
         
-        ${taskListHtml}
-        
-        <div style="margin: 24px 0; padding: 16px; background-color: #fef2f2; border-radius: 12px; border: 1px solid #fee2e2;">
-          <p style="margin: 0; color: #991b1b; font-weight: bold; font-size: 14px;">
-            ⚠️ Submission closes at 12:00 PM Today
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #1e40af 0%, #0f172a 100%); padding: 32px 24px; text-align: center; color: white;">
+          <h1 style="margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">Plan for the Day</h1>
+          <p style="margin: 8px 0 0 0; font-size: 14px; opacity: 0.9;">Submission Window: 9:00 AM - 12:00 Noon</p>
+        </div>
+
+        <!-- Main Content -->
+        <div style="padding: 32px 24px;">
+          <p style="margin-top: 0; font-size: 16px; color: #374151; line-height: 1.6;">
+            Dear Team Member,
+          </p>
+          
+          <p style="font-size: 16px; color: #374151; line-height: 1.6;">
+            This is a reminder to submit your <strong>Plan for the Day</strong> for <strong>${currentDate}</strong>.
+          </p>
+
+          <p style="font-size: 14px; color: #6b7280; line-height: 1.6; margin-bottom: 8px;">
+            <strong>⏰ Important Timeline:</strong>
+          </p>
+          <ul style="list-style: none; padding: 0; margin: 0 0 24px 0; color: #374151; font-size: 14px;">
+            <li style="padding: 8px 0; padding-left: 20px; position: relative;">
+              <span style="position: absolute; left: 0;">📌</span>
+              <strong>Submission Period:</strong> 9:00 AM - 12:00 Noon
+            </li>
+            <li style="padding: 8px 0; padding-left: 20px; position: relative;">
+              <span style="position: absolute; left: 0;">🔒</span>
+              <strong>Portal Closes:</strong> 12:00 Noon
+            </li>
+            <li style="padding: 8px 0; padding-left: 20px; position: relative;">
+              <span style="position: absolute; left: 0;">⚠️</span>
+              <strong>Deadline:</strong> No submissions accepted after 12:00 Noon
+            </li>
+          </ul>
+
+          ${taskListHtml}
+
+          <!-- CTA Button -->
+          <div style="margin: 32px 0; text-align: center;">
+            <a href="${process.env.APP_URL || 'http://localhost:5000'}/plan-for-today" 
+               style="display: inline-block; background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%); color: white; padding: 14px 40px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); transition: transform 0.2s;">
+               Submit Your Plan Now →
+            </a>
+          </div>
+
+          <!-- Instruction -->
+          <div style="background: #ecfdf5; border-left: 4px solid #10b981; padding: 16px; border-radius: 8px; margin: 24px 0;">
+            <p style="margin: 0; color: #065f46; font-size: 13px; line-height: 1.6;">
+              <strong>How to proceed:</strong> Click the button above or log in to the Time Strap portal to submit your plan for today. Include all planned tasks, estimated hours, and any relevant project information.
+            </p>
+          </div>
+
+          <!-- Footer Info -->
+          <p style="font-size: 13px; color: #9ca3af; margin-top: 24px; line-height: 1.6;">
+            If you have any questions or require assistance, please contact your manager or the HR department immediately.
           </p>
         </div>
 
-        <div style="margin-top: 32px;">
-          <a href="${process.env.APP_URL || 'http://localhost:5000'}/plan-for-today" 
-             style="display: inline-block; background-color: #2563eb; color: white; padding: 14px 32px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.39);">
-             Start My Day Plan →
-          </a>
+        <!-- Footer -->
+        <div style="background-color: #f3f4f6; padding: 20px 24px; border-top: 1px solid #e5e7eb; text-align: center;">
+          <p style="margin: 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">
+            Time Strap - Automated System
+          </p>
+          <p style="margin: 6px 0 0 0; font-size: 11px; color: #9ca3af;">
+            This is an automated message. Please do not reply to this email.
+          </p>
         </div>
       </div>
-      
-      <div style="margin-top: 40px; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 20px;">
-        <p style="color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;">
-          Time Strap Automated System
-        </p>
-      </div>
-    </div>
+    </body>
+    </html>
   `;
 
-  console.log(`[ALERT EMAIL] Sending reminder to ${recipients.length} employees`);
-  return await sendEmail({ to: recipients, subject, html });
+  console.log(`[REMINDER EMAIL] Sending reminder to ${validRecipients.length} valid recipient(s)`);
+  if (invalidRecipients.length > 0) {
+    console.warn(`[REMINDER EMAIL] Skipped invalid recipients: ${invalidRecipients.join(', ')}`);
+  }
+
+  const result = await sendEmail({ to: validRecipients, subject, html, maxRetries: 2 });
+  
+  if (result.success) {
+    console.log(`[REMINDER EMAIL] ✓ Successfully sent to ${result.details?.recipientCount} recipients`);
+  } else {
+    console.error(`[REMINDER EMAIL] ✗ Failed: ${result.error}`);
+  }
+
+  return result;
+}
+
+/* ============================
+   PORTAL CLOSED NOTIFICATION EMAIL
+   Sent at 12:00 Noon when submission window closes
+============================ */
+export async function sendPortalClosedNotificationEmail(data: {
+  recipients: string[];
+  missedSubmissionType: 'daily_plan' | 'timesheet' | 'both';
+  date: string;
+}) {
+  const { recipients = [], missedSubmissionType, date } = data;
+  
+  // Validate recipients
+  const { valid: validRecipients, invalid: invalidRecipients } = validateEmailList(recipients);
+  
+  if (validRecipients.length === 0) {
+    console.error(`[PORTAL CLOSED EMAIL] No valid recipients. Invalid: ${invalidRecipients.join(', ')}`);
+    return { 
+      success: false, 
+      error: "No valid recipient emails",
+      details: { invalidRecipients }
+    };
+  }
+
+  const subject = `Submission Deadline Passed - Action Required - ${date}`;
+  
+  const missingItemsText = 
+    missedSubmissionType === 'daily_plan' ? 'Plan for the Day'
+    : missedSubmissionType === 'timesheet' ? 'Timesheet'
+    : 'Plan for the Day and Timesheet';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #f9fafb; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+      <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        
+        <!-- Header - Alert -->
+        <div style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); padding: 32px 24px; text-align: center; color: white;">
+          <h1 style="margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">⏰ Submission Portal Closed</h1>
+          <p style="margin: 8px 0 0 0; font-size: 14px; opacity: 0.9;">Date: ${date}</p>
+        </div>
+
+        <!-- Main Content -->
+        <div style="padding: 32px 24px;">
+          <p style="margin-top: 0; font-size: 16px; color: #374151; line-height: 1.6;">
+            Dear Team Member,
+          </p>
+          
+          <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 16px; border-radius: 8px; margin: 20px 0;">
+            <p style="margin: 0; color: #7f1d1d; font-weight: 600; font-size: 15px;">
+              ⚠️ The submission portal has been closed at 12:00 Noon (Noon).
+            </p>
+          </div>
+
+          <p style="font-size: 15px; color: #374151; line-height: 1.6; margin: 20px 0;">
+            <strong>Missing Submission:</strong> <span style="color: #dc2626; font-weight: 600;">${missingItemsText}</span>
+          </p>
+
+          <p style="font-size: 15px; color: #374151; line-height: 1.6;">
+            Your submission for <strong>${date}</strong> was not completed before the deadline. This may impact your attendance and compliance records.
+          </p>
+
+          <!-- Action Required Box -->
+          <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 16px; border-radius: 8px; margin: 24px 0;">
+            <p style="margin: 0; color: #92400e; font-weight: 600; font-size: 14px; line-height: 1.6;">
+              <strong>🔔 Action Required:</strong><br/>
+              Please contact your <strong>HR Department</strong> or <strong>Manager</strong> immediately to resolve this missed submission. They will guide you on the next steps.
+            </p>
+          </div>
+
+          <!-- Contact Information -->
+          <div style="background: #f0f9ff; border-left: 4px solid #0284c7; padding: 16px; border-radius: 8px; margin: 24px 0;">
+            <p style="margin: 0; color: #0c4a6e; font-weight: 600; font-size: 14px;">📞 Contact Information:</p>
+            <ul style="margin: 8px 0 0 0; padding-left: 20px; color: #0c4a6e; font-size: 14px; line-height: 1.8;">
+              <li>HR Department - Please respond as soon as possible</li>
+              <li>Your Direct Manager - Can provide context for late submission</li>
+            </ul>
+          </div>
+
+          <!-- Important Notes -->
+          <p style="font-size: 13px; color: #6b7280; margin-top: 24px; line-height: 1.6;">
+            <strong>Important:</strong> Missed submissions may result in:
+          </p>
+          <ul style="list-style: none; padding: 0; margin: 0 0 24px 0; color: #6b7280; font-size: 13px;">
+            <li style="padding: 6px 0; padding-left: 20px; position: relative;">
+              <span style="position: absolute; left: 0;">•</span>
+              Attendance mark adjustments
+            </li>
+            <li style="padding: 6px 0; padding-left: 20px; position: relative;">
+              <span style="position: absolute; left: 0;">•</span>
+              Compliance record updates
+            </li>
+            <li style="padding: 6px 0; padding-left: 20px; position: relative;">
+              <span style="position: absolute; left: 0;">•</span>
+              Managerial review and follow-up
+            </li>
+          </ul>
+
+          <p style="font-size: 13px; color: #9ca3af; margin-top: 24px; line-height: 1.6;">
+            <strong>Submission Reminder:</strong> The portal will reopen tomorrow at 9:00 AM. Please ensure timely submissions going forward.
+          </p>
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color: #f3f4f6; padding: 20px 24px; border-top: 1px solid #e5e7eb; text-align: center;">
+          <p style="margin: 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">
+            Time Strap - Automated System
+          </p>
+          <p style="margin: 6px 0 0 0; font-size: 11px; color: #9ca3af;">
+            This is an automated alert message. Please contact HR if you have questions.
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  console.log(`[PORTAL CLOSED EMAIL] Sending portal closure notification to ${validRecipients.length} recipient(s)`);
+  if (invalidRecipients.length > 0) {
+    console.warn(`[PORTAL CLOSED EMAIL] Skipped invalid recipients: ${invalidRecipients.join(', ')}`);
+  }
+
+  const result = await sendEmail({ to: validRecipients, subject, html, maxRetries: 2 });
+  
+  if (result.success) {
+    console.log(`[PORTAL CLOSED EMAIL] ✓ Successfully sent to ${result.details?.recipientCount} recipients`);
+  } else {
+    console.error(`[PORTAL CLOSED EMAIL] ✗ Failed: ${result.error}`);
+  }
+
+  return result;
 }
 
 export async function sendEODSummaryReportEmail(data: { 
@@ -827,7 +1149,20 @@ export async function sendEODSummaryReportEmail(data: {
   summary: { total: number, submitted: number, missing: number, onLeave: number },
   reportRows: string 
 }) {
-  const { recipients, date, summary, reportRows } = data;
+  const { recipients = [], date, summary, reportRows } = data;
+  
+  // Validate recipients
+  const { valid: validRecipients, invalid: invalidRecipients } = validateEmailList(recipients);
+  
+  if (validRecipients.length === 0) {
+    console.error(`[EOD REPORT EMAIL] No valid recipients. Invalid: ${invalidRecipients.join(', ')}`);
+    return { 
+      success: false, 
+      error: "No valid recipient emails for EOD report",
+      details: { invalidRecipients }
+    };
+  }
+  
   const subject = `📊 EOD Summary Report - ${date}`;
   
   const html = `
@@ -878,7 +1213,20 @@ export async function sendEODSummaryReportEmail(data: {
     </div>
   `;
 
-  return await sendEmail({ to: recipients, subject, html });
+  console.log(`[EOD REPORT EMAIL] Sending EOD report to ${validRecipients.length} valid recipient(s) for date: ${date}`);
+  if (invalidRecipients.length > 0) {
+    console.warn(`[EOD REPORT EMAIL] Skipped invalid recipients: ${invalidRecipients.join(', ')}`);
+  }
+
+  const result = await sendEmail({ to: validRecipients, subject, html, maxRetries: 2 });
+  
+  if (result.success) {
+    console.log(`[EOD REPORT EMAIL] ✓ Successfully sent to ${result.details?.recipientCount} recipients`);
+  } else {
+    console.error(`[EOD REPORT EMAIL] ✗ Failed: ${result.error}`);
+  }
+
+  return result;
 }
 
 export async function sendTaskPostponementEmail(data: {

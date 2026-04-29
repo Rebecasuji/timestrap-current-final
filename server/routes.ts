@@ -5,7 +5,7 @@ import { storage } from "./storage";
 import { promises as fs } from "fs";
 import path from "path";   // ✅ KEEP THIS
 import { pool } from "./db";
-import { pmsPool, saveSiteReportToPMS } from "./pmsSupabase";
+import { pmsPool, saveSiteReportToPMS, getTasks } from "./pmsSupabase";
 import { getLMSHours } from "./lmsSupabase";
 import { format, parseISO, eachDayOfInterval, isSameDay } from "date-fns";
 
@@ -1838,23 +1838,99 @@ export async function registerRoutes(
       }
 
       const allEmployees = await storage.getEmployees();
-      const recipients = allEmployees.filter(e => e.isActive && e.email).map(e => e.email) as string[];
-
-      if (recipients.length === 0) {
-        return res.status(404).json({ error: "No active employees with valid email addresses found." });
+      const activeEmployees = allEmployees.filter(e => e.isActive && e.role !== 'admin' && e.email);
+      
+      if (activeEmployees.length === 0) {
+        return res.status(400).json({ 
+          error: "No active employees with email addresses found to send reminders to.",
+          success: false,
+          count: 0
+        });
       }
 
+      const today = format(new Date(), 'yyyy-MM-dd');
       const { sendDailyPlanReminderEmail } = await import('./email');
-      const result = await sendDailyPlanReminderEmail({ recipients });
 
-      if (!result.success) {
-        return res.status(500).json({ error: "Failed to send reminder email." });
+      let sentCount = 0;
+      let skippedCount = 0;
+      const failed: Array<{ employeeCode: string; email: string; error: any }> = [];
+      const sent: Array<{ employeeCode: string; email: string; emailId?: string }> = [];
+
+      console.log(`[ALERT BUTTON] Starting reminder email batch for ${activeEmployees.length} employees`);
+
+      for (const emp of activeEmployees) {
+        try {
+          const existingPlan = await storage.getDailyPlanByDate(emp.id, today);
+          if (existingPlan) {
+            skippedCount++;
+            console.log(`[ALERT BUTTON] Skipped ${emp.employeeCode} - already has plan for today`);
+            continue;
+          }
+
+          let pendingTasks: string[] = [];
+          try {
+            const tasks = await getTasks(undefined, undefined, emp.employeeCode);
+            pendingTasks = Array.isArray(tasks) ? tasks.map((t: any) => t.task_name) : [];
+          } catch (taskErr) {
+            console.warn(`[ALERT BUTTON] Failed to fetch tasks for ${emp.employeeCode}:`, taskErr);
+            // Continue anyway, send reminder without pending tasks
+          }
+
+          const emailResult = await sendDailyPlanReminderEmail({ recipients: [emp.email], pendingTasks });
+          
+          if (emailResult.success) {
+            sentCount++;
+            sent.push({ 
+              employeeCode: emp.employeeCode, 
+              email: emp.email,
+              emailId: emailResult.details?.emailId
+            });
+            console.log(`[ALERT BUTTON] ✓ Email sent to ${emp.employeeCode} (${emp.email})`);
+          } else {
+            failed.push({ 
+              employeeCode: emp.employeeCode, 
+              email: emp.email,
+              error: emailResult.error || emailResult.details?.error || 'unknown error'
+            });
+            console.error(`[ALERT BUTTON] ✗ Failed to send to ${emp.employeeCode} (${emp.email}): ${emailResult.error}`);
+          }
+        } catch (empError) {
+          console.error(`[ALERT BUTTON] Error processing ${emp.employeeCode}:`, empError);
+          failed.push({ 
+            employeeCode: emp.employeeCode, 
+            email: emp.email,
+            error: empError instanceof Error ? empError.message : 'unknown error'
+          });
+        }
       }
 
-      res.json({ success: true, count: recipients.length });
+      console.log(`[ALERT BUTTON] Summary - Sent: ${sentCount}, Skipped: ${skippedCount}, Failed: ${failed.length}`);
+
+      if (sentCount === 0 && failed.length > 0) {
+        return res.status(500).json({ 
+          success: false,
+          error: `Failed to send reminder emails. All ${failed.length} attempts failed.`,
+          count: sentCount,
+          skipped: skippedCount,
+          failed 
+        });
+      }
+
+      return res.json({ 
+        success: true, 
+        count: sentCount, 
+        skipped: skippedCount,
+        sent,
+        failed: failed.length > 0 ? failed : undefined,
+        message: `Successfully sent ${sentCount} reminder email(s)${failed.length > 0 ? ` (${failed.length} failed)` : ''}`
+      });
     } catch (err) {
-      console.error("[REMINDER API] Failed:", err);
-      res.status(500).json({ error: "Server error while sending reminders." });
+      console.error("[ALERT BUTTON] Server error:", err);
+      res.status(500).json({ 
+        success: false,
+        error: "Server error while sending reminder alerts.",
+        details: err instanceof Error ? err.message : 'unknown error'
+      });
     }
   });
 
@@ -1867,16 +1943,38 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Unauthorized. Admin/HR only." });
       }
 
-      const today = new Date().toISOString().split('T')[0];
+      const now = new Date();
+      const hour = now.getHours();
+      if (hour < 12) {
+        return res.status(403).json({ error: "Close Alert can only be sent at or after 12:00 PM." });
+      }
+
+      const today = now.toISOString().split('T')[0];
       const allEmployees = await storage.getEmployees();
       const activeEmployees = allEmployees.filter(e => e.isActive && e.role === 'employee');
 
       const missedTimesheet: any[] = [];
       const missedDailyPlan: any[] = [];
+      const missedByEmployee = new Map<string, any>();
 
       for (const emp of activeEmployees) {
-        // Check Daily Plan
         const plan = await storage.getDailyPlanByDate(emp.id, today);
+        const entries = await storage.getTimeEntriesByEmployeeAndDate(emp.id, today);
+        const missedItems: string[] = [];
+
+        if (!plan) missedItems.push('daily_plan');
+        if (entries.length === 0) missedItems.push('timesheet');
+
+        if (missedItems.length > 0) {
+          missedByEmployee.set(emp.employeeCode, {
+            employeeName: emp.name,
+            employeeCode: emp.employeeCode,
+            department: emp.department,
+            email: emp.email,
+            missedItems,
+          });
+        }
+
         if (!plan) {
           missedDailyPlan.push({
             employeeName: emp.name,
@@ -1886,8 +1984,6 @@ export async function registerRoutes(
           });
         }
 
-        // Check Timesheet
-        const entries = await storage.getTimeEntriesByEmployeeAndDate(emp.id, today);
         if (entries.length === 0) {
           missedTimesheet.push({
             employeeName: emp.name,
@@ -1898,66 +1994,32 @@ export async function registerRoutes(
         }
       }
 
-      const { sendMissedSubmissionAdminEmail, sendLOPWarningEmail } = await import('./email');
-      
-      // 1. Notify Admin/HR with the full list
-      const adminRecipients = (process.env.SENDER_EMAIL || "pushpa.p@ctint.in,sp@ctint.in").split(",").map(e => e.trim());
-      await sendMissedSubmissionAdminEmail({
-        adminRecipients,
-        date: today,
-        missedTimesheet: missedTimesheet.map(({ email, ...rest }) => rest),
-        missedDailyPlan: missedDailyPlan.map(({ email, ...rest }) => rest)
-      });
+      console.log(`[EOD BUTTON] Starting EOD report generation for date: ${today}`);
+      console.log(`[EOD BUTTON] Summary - Missed Plans: ${missedDailyPlan.length}, Missed Timesheets: ${missedTimesheet.length}, Affected Employees: ${missedByEmployee.size}`);
 
-      // 2. Notify individual employees with LOP warning
-      const allMissed = new Map<string, any>();
-      
-      missedDailyPlan.forEach(e => {
-        if (!allMissed.has(e.employeeCode)) {
-          allMissed.set(e.employeeCode, { ...e, missedItems: ['daily_plan'] });
-        } else {
-          allMissed.get(e.employeeCode).missedItems.push('daily_plan');
-        }
-      });
+      const { generateAndSendEODReport } = await import('./scheduler');
+      const eodReportResult = await generateAndSendEODReport(today, 'Manual Alert');
 
-      missedTimesheet.forEach(e => {
-        if (!allMissed.has(e.employeeCode)) {
-          allMissed.set(e.employeeCode, { ...e, missedItems: ['timesheet'] });
-        } else {
-          const item = allMissed.get(e.employeeCode);
-          if (!item.missedItems.includes('timesheet')) {
-            item.missedItems.push('timesheet');
-          }
-        }
-      });
-
-      for (const [code, details] of allMissed.entries()) {
-        if (details.email) {
-          try {
-            await sendLOPWarningEmail({
-              employeeName: details.employeeName,
-              employeeEmail: details.email,
-              employeeCode: details.employeeCode,
-              date: today,
-              missedItems: details.missedItems,
-              cc: adminRecipients
-            });
-          } catch (e) {
-            console.error(`[LOP WARNING] Failed for ${details.employeeCode}:`, e);
-          }
-        }
-      }
+      console.log(`[EOD BUTTON] Report generation completed`);
 
       res.json({
         success: true,
+        timestamp: new Date().toISOString(),
+        date: today,
         summary: {
           missedDailyPlan: missedDailyPlan.length,
-          missedTimesheet: missedTimesheet.length
-        }
+          missedTimesheet: missedTimesheet.length,
+          affectedEmployees: missedByEmployee.size,
+        },
+        message: `EOD report sent successfully. ${missedDailyPlan.length + missedTimesheet.length} submission issues detected.`
       });
     } catch (err) {
-      console.error("[END OF DAY CHECK] Failed:", err);
-      res.status(500).json({ error: "Failed to run missed submission check." });
+      console.error("[EOD BUTTON] Failed:", err);
+      res.status(500).json({ 
+        success: false,
+        error: "Failed to generate and send EOD report.",
+        details: err instanceof Error ? err.message : 'unknown error'
+      });
     }
   });
 
@@ -2240,6 +2302,39 @@ export async function registerRoutes(
     } catch (error) {
       console.error('Update settings error:', error);
       res.status(500).json({ error: 'Failed to update settings' });
+    }
+  });
+
+  // Toggle force allow final submit (E0046, E0048 only)
+  app.patch('/api/settings/force-allow-final-submit', async (req, res) => {
+    try {
+      const { employeeId, enabled } = req.body;
+      const actor = await storage.getEmployee(employeeId);
+      if (!actor || (actor.employeeCode !== 'E0046' && actor.employeeCode !== 'E0048')) {
+        return res.status(403).json({ error: 'Unauthorized. Only E0046 and E0048 can toggle this setting.' });
+      }
+      const settings = await readSettings();
+      settings.forceAllowFinalSubmit = !!enabled;
+      const success = await writeSettings(settings);
+      if (!success) {
+        return res.status(500).json({ error: 'Failed to write settings' });
+      }
+      broadcast('force_allow_final_submit_changed', { enabled: !!enabled, changedBy: actor.name });
+      res.json({ success: true, settings });
+    } catch (err) {
+      console.error('[SETTINGS] Failed to toggle force allow final submit:', err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Get settings
+  app.get('/api/settings', async (req, res) => {
+    try {
+      const settings = await readSettings();
+      res.json(settings);
+    } catch (err) {
+      console.error('[SETTINGS] Failed to read settings:', err);
+      res.status(500).json({ error: 'Server error' });
     }
   });
 

@@ -249,6 +249,51 @@ export default function TrackerPage({ user }: TrackerPageProps) {
     enabled: !!user?.id,
   });
 
+  // Fetch settings
+  const { data: settings = {} } = useQuery({
+    queryKey: ['/api/settings'],
+    queryFn: async () => {
+      const res = await fetch('/api/settings');
+      if (!res.ok) throw new Error('Failed to fetch settings');
+      return res.json();
+    },
+  });
+
+  const canToggleForceSubmit = user.employeeCode === 'E0046' || user.employeeCode === 'E0048';
+
+  // Toggle force allow final submit mutation
+  const toggleForceAllowMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await fetch('/api/settings/force-allow-final-submit', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, employeeId: user.id }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || 'Failed to toggle setting');
+      }
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/settings'] });
+      const enabled = data?.settings?.forceAllowFinalSubmit ?? settings.forceAllowFinalSubmit;
+      toast({
+        title: 'Force Submit Updated',
+        description: enabled
+          ? 'Force submit is now enabled for all employees.'
+          : 'Force submit is now disabled and 8-hour rule is enforced.',
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        title: 'Toggle Failed',
+        description: error?.message || 'Could not update force submit setting. Try again.',
+        variant: 'destructive',
+      });
+    },
+  });
+
   // Filter entries for selected date, but ALWAYS include rejected entries from any date
   const todaysEntries = serverEntries.filter(e => e.date === formattedDate || e.status === 'rejected');
 
@@ -522,7 +567,7 @@ export default function TrackerPage({ user }: TrackerPageProps) {
     !isSubmitting &&
     !alreadySubmittedToday &&
     pendingTasks.length > 0 &&
-    hasEnoughHours;
+    (hasEnoughHours || settings.forceAllowFinalSubmit);
 
 
   const handleSaveTask = async (taskData: Task) => {
@@ -947,6 +992,30 @@ export default function TrackerPage({ user }: TrackerPageProps) {
           <div className="flex items-center gap-3">
             <PointsDisplay />
           </div>
+
+          {canToggleForceSubmit && (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className={`bg-slate-800 border-blue-500/20 text-white hover:bg-slate-700 ${settings.forceAllowFinalSubmit ? 'border-emerald-400/40 text-emerald-200' : ''}`}
+                onClick={() => toggleForceAllowMutation.mutate(!settings.forceAllowFinalSubmit)}
+                disabled={toggleForceAllowMutation.isPending}
+              >
+                {toggleForceAllowMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : settings.forceAllowFinalSubmit ? (
+                  'Force Submit: ON'
+                ) : (
+                  'Force Submit: OFF'
+                )}
+              </Button>
+              <span className={`text-xs ${settings.forceAllowFinalSubmit ? 'text-emerald-300' : 'text-slate-400'}`}>
+                {settings.forceAllowFinalSubmit ? '8-hour bypass active' : '8-hour rule enforced'}
+              </span>
+            </div>
+          )}
+
           <Popover>
             <PopoverTrigger asChild>
               <Button
