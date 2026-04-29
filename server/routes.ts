@@ -1746,11 +1746,15 @@ export async function registerRoutes(
       const now = new Date();
       const planDate = date || now.toISOString().split('T')[0];
 
-      // Check if daily plan is closed for this date
-      const isClosed = await storage.isDailyPlanClosed(planDate);
-      if (isClosed) {
-        return res.status(403).json({ error: "Daily plan submission is closed for today (portal closes at 12:00 PM)." });
+      // Check if plan window toggle is open (manual control has priority)
+      const settings = await readSettings();
+      if (!settings.planWindowOpen) {
+        // Portal is manually CLOSED - block submissions
+        return res.status(403).json({ error: "Plan window is currently closed. Submissions are not allowed. Contact your administrator to reopen." });
       }
+
+      // Portal is manually OPEN - allow submissions anytime
+      // (Manual toggle overrides the automatic 12 PM closure)
 
       // Plan window is always open unless explicitly restricted by other future logic
       const isInTimeWindow = true; 
@@ -1839,98 +1843,40 @@ export async function registerRoutes(
 
       const allEmployees = await storage.getEmployees();
       const activeEmployees = allEmployees.filter(e => e.isActive && e.role !== 'admin' && e.email);
-      
-      if (activeEmployees.length === 0) {
-        return res.status(400).json({ 
-          error: "No active employees with email addresses found to send reminders to.",
-          success: false,
-          count: 0
-        });
-      }
-
       const today = format(new Date(), 'yyyy-MM-dd');
       const { sendDailyPlanReminderEmail } = await import('./email');
 
       let sentCount = 0;
-      let skippedCount = 0;
-      const failed: Array<{ employeeCode: string; email: string; error: any }> = [];
-      const sent: Array<{ employeeCode: string; email: string; emailId?: string }> = [];
-
-      console.log(`[ALERT BUTTON] Starting reminder email batch for ${activeEmployees.length} employees`);
+      const failed: Array<{ employeeCode: string; error: any }> = [];
 
       for (const emp of activeEmployees) {
+        const existingPlan = await storage.getDailyPlanByDate(emp.id, today);
+        if (existingPlan) continue;
+
+        let pendingTasks: string[] = [];
         try {
-          const existingPlan = await storage.getDailyPlanByDate(emp.id, today);
-          if (existingPlan) {
-            skippedCount++;
-            console.log(`[ALERT BUTTON] Skipped ${emp.employeeCode} - already has plan for today`);
-            continue;
-          }
+          const tasks = await getTasks(undefined, undefined, emp.employeeCode);
+          pendingTasks = Array.isArray(tasks) ? tasks.map((t: any) => t.task_name) : [];
+        } catch (taskErr) {
+          console.warn(`[REMINDER API] Failed to fetch tasks for ${emp.employeeCode}:`, taskErr);
+        }
 
-          let pendingTasks: string[] = [];
-          try {
-            const tasks = await getTasks(undefined, undefined, emp.employeeCode);
-            pendingTasks = Array.isArray(tasks) ? tasks.map((t: any) => t.task_name) : [];
-          } catch (taskErr) {
-            console.warn(`[ALERT BUTTON] Failed to fetch tasks for ${emp.employeeCode}:`, taskErr);
-            // Continue anyway, send reminder without pending tasks
-          }
-
-          const emailResult = await sendDailyPlanReminderEmail({ recipients: [emp.email], pendingTasks });
-          
-          if (emailResult.success) {
-            sentCount++;
-            sent.push({ 
-              employeeCode: emp.employeeCode, 
-              email: emp.email,
-              emailId: emailResult.details?.emailId
-            });
-            console.log(`[ALERT BUTTON] ✓ Email sent to ${emp.employeeCode} (${emp.email})`);
-          } else {
-            failed.push({ 
-              employeeCode: emp.employeeCode, 
-              email: emp.email,
-              error: emailResult.error || emailResult.details?.error || 'unknown error'
-            });
-            console.error(`[ALERT BUTTON] ✗ Failed to send to ${emp.employeeCode} (${emp.email}): ${emailResult.error}`);
-          }
-        } catch (empError) {
-          console.error(`[ALERT BUTTON] Error processing ${emp.employeeCode}:`, empError);
-          failed.push({ 
-            employeeCode: emp.employeeCode, 
-            email: emp.email,
-            error: empError instanceof Error ? empError.message : 'unknown error'
-          });
+        const result = await sendDailyPlanReminderEmail({ recipients: [emp.email], pendingTasks });
+        if (result.success) {
+          sentCount += 1;
+        } else {
+          failed.push({ employeeCode: emp.employeeCode, error: result.error || result.err || 'unknown' });
         }
       }
 
-      console.log(`[ALERT BUTTON] Summary - Sent: ${sentCount}, Skipped: ${skippedCount}, Failed: ${failed.length}`);
-
       if (sentCount === 0 && failed.length > 0) {
-        return res.status(500).json({ 
-          success: false,
-          error: `Failed to send reminder emails. All ${failed.length} attempts failed.`,
-          count: sentCount,
-          skipped: skippedCount,
-          failed 
-        });
+        return res.status(500).json({ error: "Failed to send any reminder email.", failed });
       }
 
-      return res.json({ 
-        success: true, 
-        count: sentCount, 
-        skipped: skippedCount,
-        sent,
-        failed: failed.length > 0 ? failed : undefined,
-        message: `Successfully sent ${sentCount} reminder email(s)${failed.length > 0 ? ` (${failed.length} failed)` : ''}`
-      });
+      return res.json({ success: true, count: sentCount, failed });
     } catch (err) {
-      console.error("[ALERT BUTTON] Server error:", err);
-      res.status(500).json({ 
-        success: false,
-        error: "Server error while sending reminder alerts.",
-        details: err instanceof Error ? err.message : 'unknown error'
-      });
+      console.error("[REMINDER API] Failed:", err);
+      res.status(500).json({ error: "Server error while sending reminders." });
     }
   });
 
@@ -1994,32 +1940,20 @@ export async function registerRoutes(
         }
       }
 
-      console.log(`[EOD BUTTON] Starting EOD report generation for date: ${today}`);
-      console.log(`[EOD BUTTON] Summary - Missed Plans: ${missedDailyPlan.length}, Missed Timesheets: ${missedTimesheet.length}, Affected Employees: ${missedByEmployee.size}`);
-
       const { generateAndSendEODReport } = await import('./scheduler');
-      const eodReportResult = await generateAndSendEODReport(today, 'Manual Alert');
-
-      console.log(`[EOD BUTTON] Report generation completed`);
+      await generateAndSendEODReport(today, 'Manual Alert');
 
       res.json({
         success: true,
-        timestamp: new Date().toISOString(),
-        date: today,
         summary: {
           missedDailyPlan: missedDailyPlan.length,
           missedTimesheet: missedTimesheet.length,
           affectedEmployees: missedByEmployee.size,
-        },
-        message: `EOD report sent successfully. ${missedDailyPlan.length + missedTimesheet.length} submission issues detected.`
+        }
       });
     } catch (err) {
-      console.error("[EOD BUTTON] Failed:", err);
-      res.status(500).json({ 
-        success: false,
-        error: "Failed to generate and send EOD report.",
-        details: err instanceof Error ? err.message : 'unknown error'
-      });
+      console.error("[END OF DAY CHECK] Failed:", err);
+      res.status(500).json({ error: "Failed to run missed submission check." });
     }
   });
 

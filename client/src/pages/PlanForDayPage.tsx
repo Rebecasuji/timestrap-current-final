@@ -224,6 +224,16 @@ export default function PlanForDayPage() {
   };
 
   const submitPlan = () => {
+    // Verify plan window is open before allowing submission
+    if (!isWindowOpen) {
+      toast({ 
+        title: "Plan Window Closed", 
+        description: "The plan submission window is currently closed. Contact your administrator to reopen.", 
+        variant: "destructive" 
+      });
+      return;
+    }
+
     const unselected = availableTasks.filter((t: any) => !selectedTasks.find((st: any) => st.id === t.id))
       .map((t: any) => ({
         taskId: t.id,
