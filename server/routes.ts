@@ -57,6 +57,14 @@ function isProjectExpired(endDate: string | null): boolean {
   }
 }
 
+// Helper function to check if plan window should be closed (after 12:30 PM)
+function isAfterPlanCutoff(): boolean {
+  const now = new Date();
+  const cutoff = new Date(now);
+  cutoff.setHours(12, 30, 0, 0);
+  return now >= cutoff;
+}
+
 async function enrichEntry(e: any) {
   let keyStepName: string | null = null;
   let pmsStartDate: string | null = null;
@@ -1691,11 +1699,17 @@ export async function registerRoutes(
     const settings = await readSettings();
     const today = format(new Date(), "yyyy-MM-dd");
     const isAutomatedClosed = await storage.isDailyPlanClosed(today);
+    const isPastCutoff = isAfterPlanCutoff();
     
-    // Portal is open ONLY if manual setting is open AND it hasn't been automated closed
+    // Portal is open ONLY if manual setting is open AND it hasn't been automated closed AND it's not past 12:30 PM
+    const planWindowOpen = !!settings.planWindowOpen && !isAutomatedClosed && !isPastCutoff;
+
     res.json({ 
-      planWindowOpen: !!settings.planWindowOpen && !isAutomatedClosed,
-      isAutomatedClosed
+      planWindowOpen,
+      isAutomatedClosed,
+      isPastCutoff,
+      cutoffTime: "12:30 PM",
+      serverTime: new Date().toISOString()
     });
   });
 
@@ -1746,15 +1760,23 @@ export async function registerRoutes(
       const now = new Date();
       const planDate = date || now.toISOString().split('T')[0];
 
-      // Check if plan window toggle is open (manual control has priority)
+      // Check if plan window toggle is open (manual control has priority, but 12:30 cutoff is STRICT)
       const settings = await readSettings();
+      const isPastCutoff = isAfterPlanCutoff();
+
+      if (isPastCutoff) {
+        return res.status(403).json({ 
+          error: "Plan window is strictly closed for today (12:30 PM cutoff).",
+          message: "Plan closed for today (12:30 PM cutoff)"
+        });
+      }
+
       if (!settings.planWindowOpen) {
         // Portal is manually CLOSED - block submissions
         return res.status(403).json({ error: "Plan window is currently closed. Submissions are not allowed. Contact your administrator to reopen." });
       }
 
-      // Portal is manually OPEN - allow submissions anytime
-      // (Manual toggle overrides the automatic 12 PM closure)
+      // Portal is manually OPEN and not past cutoff - allow submissions
 
       // Plan window is always open unless explicitly restricted by other future logic
       const isInTimeWindow = true; 
@@ -1834,49 +1856,118 @@ export async function registerRoutes(
   app.post("/api/daily-plans/reminder", async (req, res) => {
     try {
       const { employeeId } = req.body;
+      
+      // Validate request
+      if (!employeeId) {
+        return res.status(400).json({ error: "Missing employeeId in request body" });
+      }
+
       const actor = await storage.getEmployee(employeeId);
       
       // Access Restricted: Only E0046 and E0048 can send reminders
       if (!actor || (actor.employeeCode !== 'E0046' && actor.employeeCode !== 'E0048')) {
+        console.warn(`[REMINDER API] Unauthorized access attempt by: ${employeeId}`);
         return res.status(403).json({ error: "Unauthorized. Access limited to E0046 and E0048." });
       }
 
+      console.log(`[REMINDER API] Starting reminder send by ${actor.employeeCode}...`);
+
       const allEmployees = await storage.getEmployees();
+      if (!allEmployees || allEmployees.length === 0) {
+        console.warn("[REMINDER API] No employees found in database");
+        return res.status(200).json({ success: true, count: 0, failed: [], message: "No employees to send reminders to" });
+      }
+
       const activeEmployees = allEmployees.filter(e => e.isActive && e.role !== 'admin' && e.email);
+      console.log(`[REMINDER API] Found ${activeEmployees.length} active employees with email`);
+
       const today = format(new Date(), 'yyyy-MM-dd');
-      const { sendDailyPlanReminderEmail } = await import('./email');
+      
+      let { sendDailyPlanReminderEmail } = await import('./email');
+      if (!sendDailyPlanReminderEmail) {
+        throw new Error("sendDailyPlanReminderEmail function not found");
+      }
 
       let sentCount = 0;
-      const failed: Array<{ employeeCode: string; error: any }> = [];
+      const failed: Array<{ employeeCode: string; email: string | null; error: any }> = [];
 
       for (const emp of activeEmployees) {
-        const existingPlan = await storage.getDailyPlanByDate(emp.id, today);
-        if (existingPlan) continue;
-
-        let pendingTasks: string[] = [];
         try {
-          const tasks = await getTasks(undefined, undefined, emp.employeeCode);
-          pendingTasks = Array.isArray(tasks) ? tasks.map((t: any) => t.task_name) : [];
-        } catch (taskErr) {
-          console.warn(`[REMINDER API] Failed to fetch tasks for ${emp.employeeCode}:`, taskErr);
-        }
+          // Verify email is valid string (should already be verified by filter, but double-check)
+          if (!emp.email || typeof emp.email !== 'string') {
+            console.warn(`[REMINDER API] Employee ${emp.employeeCode} has invalid email: ${emp.email}`);
+            failed.push({ 
+              employeeCode: emp.employeeCode, 
+              email: emp.email || null,
+              error: 'Invalid email address' 
+            });
+            continue;
+          }
 
-        const result = await sendDailyPlanReminderEmail({ recipients: [emp.email], pendingTasks });
-        if (result.success) {
-          sentCount += 1;
-        } else {
-          failed.push({ employeeCode: emp.employeeCode, error: result.error || result.err || 'unknown' });
+          // Fetch tasks for employee
+          let pendingTasks: string[] = [];
+          try {
+            const tasks = await getTasks(undefined, undefined, emp.employeeCode);
+            if (Array.isArray(tasks) && tasks.length > 0) {
+              pendingTasks = tasks
+                .filter((t: any) => t && t.task_name)
+                .map((t: any) => String(t.task_name).trim())
+                .filter((name: string) => name.length > 0);
+            }
+          } catch (taskErr) {
+            console.warn(`[REMINDER API] Failed to fetch tasks for ${emp.employeeCode}:`, taskErr);
+            // Continue without tasks - this is not a blocker
+          }
+
+          // Send reminder email to all active employees (regardless of submission status)
+          const result = await sendDailyPlanReminderEmail({ 
+            recipients: [emp.email], 
+            pendingTasks 
+          });
+
+          if (result?.success) {
+            sentCount += 1;
+            console.log(`[REMINDER API] ✓ Sent to ${emp.employeeCode} (${emp.email})`);
+          } else {
+            failed.push({ 
+              employeeCode: emp.employeeCode, 
+              email: emp.email,
+              error: result?.error || 'Unknown error' 
+            });
+            console.error(`[REMINDER API] ✗ Failed for ${emp.employeeCode}: ${result?.error || 'unknown'}`);
+          }
+        } catch (empErr) {
+          console.error(`[REMINDER API] Error processing ${emp.employeeCode}:`, empErr);
+          failed.push({ 
+            employeeCode: emp.employeeCode, 
+            email: emp.email,
+            error: empErr instanceof Error ? empErr.message : String(empErr) 
+          });
         }
       }
+
+      console.log(`[REMINDER API] Summary: Sent=${sentCount}, Failed=${failed.length}`);
 
       if (sentCount === 0 && failed.length > 0) {
-        return res.status(500).json({ error: "Failed to send any reminder email.", failed });
+        return res.status(400).json({ 
+          error: "Failed to send any reminder emails", 
+          details: { failed, sentCount } 
+        });
       }
 
-      return res.json({ success: true, count: sentCount, failed });
+      return res.json({ 
+        success: true, 
+        count: sentCount, 
+        failed,
+        summary: `Sent ${sentCount} reminder(s) to all active employees. ${failed.length} failed.`
+      });
     } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
       console.error("[REMINDER API] Failed:", err);
-      res.status(500).json({ error: "Server error while sending reminders." });
+      res.status(500).json({ 
+        error: "Server error while sending reminders",
+        details: process.env.NODE_ENV === 'development' ? errorMsg : undefined
+      });
     }
   });
 

@@ -1,6 +1,7 @@
 // Resend email integration for Time Strap
 import { Resend } from "resend";
 import "dotenv/config";
+import { format } from "date-fns";
 import { TimeEntry } from "@shared/schema";
 import PDFDocument from "pdfkit";
 
@@ -880,130 +881,154 @@ export async function sendDailyPlanSubmittedEmail(data: {
 }
 
 export async function sendDailyPlanReminderEmail(data: { recipients: string[], pendingTasks?: string[] }) {
-  const { recipients = [], pendingTasks = [] } = data;
-  
-  // Validate recipients
-  const { valid: validRecipients, invalid: invalidRecipients } = validateEmailList(recipients);
-  
-  if (validRecipients.length === 0) {
-    console.error(`[REMINDER EMAIL] No valid recipients. Invalid: ${invalidRecipients.join(', ')}`);
-    return { 
-      success: false, 
-      error: "No valid recipient emails",
-      details: { invalidRecipients }
-    };
-  }
+  try {
+    const { recipients = [], pendingTasks = [] } = data;
+    
+    // Validate recipients
+    const { valid: validRecipients, invalid: invalidRecipients } = validateEmailList(recipients);
+    
+    if (validRecipients.length === 0) {
+      console.error(`[REMINDER EMAIL] No valid recipients. Invalid: ${invalidRecipients.join(', ')}`);
+      return { 
+        success: false, 
+        error: "No valid recipient emails",
+        details: { invalidRecipients }
+      };
+    }
 
-  const currentDate = format(new Date(), 'MMMM dd, yyyy');
-  const subject = `Action Required: Submit Your Plan for the Day - ${currentDate}`;
-  
-  const taskListHtml = pendingTasks.length > 0 
-    ? `
-      <div style="margin: 24px 0; padding: 16px; background: linear-gradient(135deg, #fef3c7 0%, #fef08a 100%); border-left: 4px solid #f59e0b; border-radius: 8px;">
-        <p style="margin-top: 0; font-weight: 700; color: #92400e; font-size: 14px;">📋 Assigned Tasks Pending Review:</p>
-        <ul style="margin-bottom: 0; padding-left: 20px; color: #78350f; line-height: 1.8;">
-          ${pendingTasks.slice(0, 5).map(t => `<li style="margin-bottom: 6px;">${t}</li>`).join('')}
-          ${pendingTasks.length > 5 ? `<li style="margin-top: 8px; font-style: italic; color: #b45309;">...and ${pendingTasks.length - 5} more task(s)</li>` : ''}
-        </ul>
-      </div>
-    `
-    : '';
-
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    </head>
-    <body style="margin: 0; padding: 0; background-color: #f9fafb; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
-      <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+    const currentDate = format(new Date(), 'MMMM dd, yyyy');
+    const subject = `Action Required: Submit Your Plan for the Day - ${currentDate}`;
+    
+    // Safely construct task list HTML
+    let taskListHtml = '';
+    if (Array.isArray(pendingTasks) && pendingTasks.length > 0) {
+      try {
+        const validTasks = pendingTasks
+          .filter((t: any) => t && typeof t === 'string')
+          .slice(0, 10);
         
-        <!-- Header -->
-        <div style="background: linear-gradient(135deg, #1e40af 0%, #0f172a 100%); padding: 32px 24px; text-align: center; color: white;">
-          <h1 style="margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">Plan for the Day</h1>
-          <p style="margin: 8px 0 0 0; font-size: 14px; opacity: 0.9;">Submission Window: 9:00 AM - 12:00 Noon</p>
-        </div>
+        if (validTasks.length > 0) {
+          taskListHtml = `
+            <div style="margin: 24px 0; padding: 16px; background: linear-gradient(135deg, #fef3c7 0%, #fef08a 100%); border-left: 4px solid #f59e0b; border-radius: 8px;">
+              <p style="margin-top: 0; font-weight: 700; color: #92400e; font-size: 14px;">📋 Assigned Tasks Pending Review:</p>
+              <ul style="margin-bottom: 0; padding-left: 20px; color: #78350f; line-height: 1.8;">
+                ${validTasks.slice(0, 5).map((t: string) => `<li style="margin-bottom: 6px;">${String(t).substring(0, 100)}</li>`).join('')}
+                ${validTasks.length > 5 ? `<li style="margin-top: 8px; font-style: italic; color: #b45309;">...and ${validTasks.length - 5} more task(s)</li>` : ''}
+              </ul>
+            </div>
+          `;
+        }
+      } catch (taskErr) {
+        console.warn(`[REMINDER EMAIL] Error constructing task list HTML:`, taskErr);
+        taskListHtml = '';
+      }
+    }
 
-        <!-- Main Content -->
-        <div style="padding: 32px 24px;">
-          <p style="margin-top: 0; font-size: 16px; color: #374151; line-height: 1.6;">
-            Dear Team Member,
-          </p>
+    const appUrl = process.env.APP_URL || 'http://localhost:5000';
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="margin: 0; padding: 0; background-color: #f9fafb; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+        <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
           
-          <p style="font-size: 16px; color: #374151; line-height: 1.6;">
-            This is a reminder to submit your <strong>Plan for the Day</strong> for <strong>${currentDate}</strong>.
-          </p>
-
-          <p style="font-size: 14px; color: #6b7280; line-height: 1.6; margin-bottom: 8px;">
-            <strong>⏰ Important Timeline:</strong>
-          </p>
-          <ul style="list-style: none; padding: 0; margin: 0 0 24px 0; color: #374151; font-size: 14px;">
-            <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-              <span style="position: absolute; left: 0;">📌</span>
-              <strong>Submission Period:</strong> 9:00 AM - 12:00 Noon
-            </li>
-            <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-              <span style="position: absolute; left: 0;">🔒</span>
-              <strong>Portal Closes:</strong> 12:00 Noon
-            </li>
-            <li style="padding: 8px 0; padding-left: 20px; position: relative;">
-              <span style="position: absolute; left: 0;">⚠️</span>
-              <strong>Deadline:</strong> No submissions accepted after 12:00 Noon
-            </li>
-          </ul>
-
-          ${taskListHtml}
-
-          <!-- CTA Button -->
-          <div style="margin: 32px 0; text-align: center;">
-            <a href="${process.env.APP_URL || 'http://localhost:5000'}/plan-for-today" 
-               style="display: inline-block; background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%); color: white; padding: 14px 40px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); transition: transform 0.2s;">
-               Submit Your Plan Now →
-            </a>
+          <!-- Header -->
+          <div style="background: linear-gradient(135deg, #1e40af 0%, #0f172a 100%); padding: 32px 24px; text-align: center; color: white;">
+            <h1 style="margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">Plan for the Day</h1>
+            <p style="margin: 8px 0 0 0; font-size: 14px; opacity: 0.9;">Submission Window: 9:00 AM - 12:00 Noon</p>
           </div>
 
-          <!-- Instruction -->
-          <div style="background: #ecfdf5; border-left: 4px solid #10b981; padding: 16px; border-radius: 8px; margin: 24px 0;">
-            <p style="margin: 0; color: #065f46; font-size: 13px; line-height: 1.6;">
-              <strong>How to proceed:</strong> Click the button above or log in to the Time Strap portal to submit your plan for today. Include all planned tasks, estimated hours, and any relevant project information.
+          <!-- Main Content -->
+          <div style="padding: 32px 24px;">
+            <p style="margin-top: 0; font-size: 16px; color: #374151; line-height: 1.6;">
+              Dear Team Member,
+            </p>
+            
+            <p style="font-size: 16px; color: #374151; line-height: 1.6;">
+              This is a reminder to submit your <strong>Plan for the Day</strong> for <strong>${currentDate}</strong>.
+            </p>
+
+            <p style="font-size: 14px; color: #6b7280; line-height: 1.6; margin-bottom: 8px;">
+              <strong>⏰ Important Timeline:</strong>
+            </p>
+            <ul style="list-style: none; padding: 0; margin: 0 0 24px 0; color: #374151; font-size: 14px;">
+              <li style="padding: 8px 0; padding-left: 20px; position: relative;">
+                <span style="position: absolute; left: 0;">📌</span>
+                <strong>Submission Period:</strong> 9:00 AM - 12:00 Noon
+              </li>
+              <li style="padding: 8px 0; padding-left: 20px; position: relative;">
+                <span style="position: absolute; left: 0;">🔒</span>
+                <strong>Portal Closes:</strong> 12:00 Noon
+              </li>
+              <li style="padding: 8px 0; padding-left: 20px; position: relative;">
+                <span style="position: absolute; left: 0;">⚠️</span>
+                <strong>Deadline:</strong> No submissions accepted after 12:00 Noon
+              </li>
+            </ul>
+
+            ${taskListHtml}
+
+            <!-- CTA Button -->
+            <div style="margin: 32px 0; text-align: center;">
+              <a href="${appUrl}/plan-for-today" 
+                 style="display: inline-block; background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%); color: white; padding: 14px 40px; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); transition: transform 0.2s;">
+                 Submit Your Plan Now →
+              </a>
+            </div>
+
+            <!-- Instruction -->
+            <div style="background: #ecfdf5; border-left: 4px solid #10b981; padding: 16px; border-radius: 8px; margin: 24px 0;">
+              <p style="margin: 0; color: #065f46; font-size: 13px; line-height: 1.6;">
+                <strong>How to proceed:</strong> Click the button above or log in to the Time Strap portal to submit your plan for today. Include all planned tasks, estimated hours, and any relevant project information.
+              </p>
+            </div>
+
+            <!-- Footer Info -->
+            <p style="font-size: 13px; color: #9ca3af; margin-top: 24px; line-height: 1.6;">
+              If you have any questions or require assistance, please contact your manager or the HR department immediately.
             </p>
           </div>
 
-          <!-- Footer Info -->
-          <p style="font-size: 13px; color: #9ca3af; margin-top: 24px; line-height: 1.6;">
-            If you have any questions or require assistance, please contact your manager or the HR department immediately.
-          </p>
+          <!-- Footer -->
+          <div style="background-color: #f3f4f6; padding: 20px 24px; border-top: 1px solid #e5e7eb; text-align: center;">
+            <p style="margin: 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">
+              Time Strap - Automated System
+            </p>
+            <p style="margin: 6px 0 0 0; font-size: 11px; color: #9ca3af;">
+              This is an automated message. Please do not reply to this email.
+            </p>
+          </div>
         </div>
+      </body>
+      </html>
+    `;
 
-        <!-- Footer -->
-        <div style="background-color: #f3f4f6; padding: 20px 24px; border-top: 1px solid #e5e7eb; text-align: center;">
-          <p style="margin: 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">
-            Time Strap - Automated System
-          </p>
-          <p style="margin: 6px 0 0 0; font-size: 11px; color: #9ca3af;">
-            This is an automated message. Please do not reply to this email.
-          </p>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
+    console.log(`[REMINDER EMAIL] Sending reminder to ${validRecipients.length} valid recipient(s)`);
+    if (invalidRecipients.length > 0) {
+      console.warn(`[REMINDER EMAIL] Skipped invalid recipients: ${invalidRecipients.join(', ')}`);
+    }
 
-  console.log(`[REMINDER EMAIL] Sending reminder to ${validRecipients.length} valid recipient(s)`);
-  if (invalidRecipients.length > 0) {
-    console.warn(`[REMINDER EMAIL] Skipped invalid recipients: ${invalidRecipients.join(', ')}`);
+    const result = await sendEmail({ to: validRecipients, subject, html, maxRetries: 2 });
+    
+    if (result.success) {
+      console.log(`[REMINDER EMAIL] ✓ Successfully sent to ${result.details?.recipientCount} recipients`);
+    } else {
+      console.error(`[REMINDER EMAIL] ✗ Failed: ${result.error}`);
+    }
+
+    return result;
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[REMINDER EMAIL] Uncaught error:`, err);
+    return {
+      success: false,
+      error: `Email send error: ${errorMsg}`,
+      details: { originalError: err }
+    };
   }
-
-  const result = await sendEmail({ to: validRecipients, subject, html, maxRetries: 2 });
-  
-  if (result.success) {
-    console.log(`[REMINDER EMAIL] ✓ Successfully sent to ${result.details?.recipientCount} recipients`);
-  } else {
-    console.error(`[REMINDER EMAIL] ✗ Failed: ${result.error}`);
-  }
-
-  return result;
 }
 
 /* ============================

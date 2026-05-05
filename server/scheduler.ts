@@ -3,7 +3,7 @@ import cron from "node-cron";
 import { storage } from "./storage";
 import { getTasks } from "./pmsSupabase";
 import { getLMSHours } from "./lmsSupabase";
-import { sendDailyPlanReminderEmail, sendEODSummaryReportEmail, sendPortalClosedNotificationEmail, sendEmail } from "./email";
+import { sendDailyPlanReminderEmail, sendEODSummaryReportEmail, sendEmail } from "./email";
 import { format, subDays } from "date-fns";
 
 /**
@@ -42,20 +42,16 @@ async function sendMorningReminders() {
 
 /**
  * Generic function to generate EOD report and send to admins
- * Returns result status for tracking purposes
  */
 export async function generateAndSendEODReport(dateStr: string, reportType: string) {
   try {
-    console.log(`[EOD REPORT] Starting ${reportType} report generation for ${dateStr}`);
+    console.log(`[SCHEDULER] Generating ${reportType} report for ${dateStr}`);
     const employees = await storage.getEmployees();
     const dateEntries = await storage.getTimeEntriesByDate(dateStr);
     const dailySubs = await storage.getDailySubmissionsByDate(dateStr);
 
     const reportData = [];
     const missingEmployees = [];
-    let emailsAttempted = 0;
-    let emailsSent = 0;
-    const emailErrors = [];
 
     for (const emp of employees) {
       if (emp.role === 'admin' && emp.employeeCode === 'ADMIN') continue;
@@ -76,18 +72,14 @@ export async function generateAndSendEODReport(dateStr: string, reportType: stri
         
         // Only trigger in-app alerts at Noon
         if (reportType.includes("Noon")) {
-          try {
-            await storage.createAlert({
-              employeeId: emp.id,
-              type: status === "Missing" ? "missing_submission" : "late_submission",
-              message: status === "Missing" 
-                ? `You missed your timesheet submission for ${dateStr}.` 
-                : `Your timesheet for ${dateStr} is incomplete and portal is now closed.`,
-              date: dateStr
-            });
-          } catch (alertErr) {
-            console.error(`[EOD REPORT] Failed to create alert for ${emp.employeeCode}:`, alertErr);
-          }
+          await storage.createAlert({
+            employeeId: emp.id,
+            type: status === "Missing" ? "missing_submission" : "late_submission",
+            message: status === "Missing" 
+              ? `You missed your timesheet submission for ${dateStr}.` 
+              : `Your timesheet for ${dateStr} is incomplete and portal is now closed.`,
+            date: dateStr
+          });
         }
       }
 
@@ -102,8 +94,6 @@ export async function generateAndSendEODReport(dateStr: string, reportType: stri
 
     const admins = employees.filter(e => e.role === 'admin' || e.role === 'hr');
     const adminEmails = admins.map(a => a.email).filter(Boolean) as string[];
-
-    console.log(`[EOD REPORT] Generated report data - Total: ${reportData.length}, Missing/Incomplete: ${missingEmployees.length}, Admins to notify: ${adminEmails.length}`);
 
     if (adminEmails.length > 0) {
       const reportRows = reportData.map(r => `
@@ -124,8 +114,7 @@ export async function generateAndSendEODReport(dateStr: string, reportType: stri
         </tr>
       `).join('');
 
-      emailsAttempted++;
-      const eodEmailResult = await sendEODSummaryReportEmail({
+      await sendEODSummaryReportEmail({
         recipients: adminEmails,
         date: dateStr,
         summary: {
@@ -136,66 +125,26 @@ export async function generateAndSendEODReport(dateStr: string, reportType: stri
         },
         reportRows
       });
-
-      if (eodEmailResult.success) {
-        emailsSent++;
-        console.log(`[EOD REPORT] ✓ EOD summary email sent to admins (${adminEmails.join(', ')})`);
-      } else {
-        console.error(`[EOD REPORT] ✗ Failed to send EOD summary email:`, eodEmailResult.error);
-        emailErrors.push({ recipient: 'admins', error: eodEmailResult.error });
-      }
-    } else {
-      console.warn(`[EOD REPORT] No admin/HR emails found to send EOD report`);
     }
 
     // Send closing alert email to missing employees only at Noon
     if (reportType.includes("Noon")) {
       const missingEmails = missingEmployees.map(e => e.email).filter(Boolean) as string[];
       if (missingEmails.length > 0) {
-        emailsAttempted++;
-        // For simplicity, we'll indicate both items as missing when the portal closes
-        const closingEmailResult = await sendPortalClosedNotificationEmail({
-          recipients: missingEmails,
-          missedSubmissionType: 'both',
-          date: dateStr
+        await sendEmail({
+          to: missingEmails,
+          subject: `⚠️ Portal Closed: Missing Timesheet Submission - ${dateStr}`,
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 32px; border: 1px solid #fee2e2; border-radius: 16px; background: #ffffff;">
+              <h2 style="color: #991b1b; margin-top: 0;">Timesheet Portal Closed</h2>
+              <p style="color: #475569; line-height: 1.6;">Your submission for today (${dateStr}) was not completed by the 12:00 PM deadline.</p>
+              <p style="color: #475569; line-height: 1.6;">Please contact your manager or HR to resolve this late submission.</p>
+            </div>
+          `
         });
-
-        if (closingEmailResult.success) {
-          emailsSent++;
-          console.log(`[EOD REPORT] ✓ Portal closure notification sent to ${missingEmails.length} missing employees`);
-        } else {
-          console.error(`[EOD REPORT] ✗ Failed to send portal closure notifications:`, closingEmailResult.error);
-          emailErrors.push({ recipient: 'missing-employees', count: missingEmails.length, error: closingEmailResult.error });
-        }
       }
     }
-
-    console.log(`[EOD REPORT] Completed - Emails sent: ${emailsSent}/${emailsAttempted}, Errors: ${emailErrors.length}`);
-
-    return {
-      success: emailErrors.length === 0,
-      reportType,
-      date: dateStr,
-      summary: {
-        totalEmployees: reportData.length,
-        submitted: reportData.filter(r => r.status === 'Submitted').length,
-        incomplete: reportData.filter(r => r.status === 'Incomplete').length,
-        missing: missingEmployees.length,
-        onLeave: reportData.filter(r => r.status === 'On Leave').length
-      },
-      emails: {
-        attempted: emailsAttempted,
-        sent: emailsSent,
-        errors: emailErrors
-      }
-    };
   } catch (error) {
-    console.error(`[EOD REPORT] ${reportType} report failed:`, error);
-    return {
-      success: false,
-      reportType,
-      error: error instanceof Error ? error.message : 'unknown error',
-      date: dateStr
-    };
+    console.error(`[SCHEDULER] ${reportType} report failed:`, error);
   }
 }

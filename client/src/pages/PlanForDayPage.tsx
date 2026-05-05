@@ -262,12 +262,41 @@ export default function PlanForDayPage() {
   };
 
   const isWindowOpen = !!windowData?.planWindowOpen;
+  const isPastCutoff = !!windowData?.isPastCutoff;
 
   // Block submission if already submitted (regardless of window status)
   const isAlreadySubmittedAndBlocked = planStatus?.submitted;
   
   // Show closed message if window is not open and plan hasn't been submitted
-  const isWindowClosedNotSubmitted = !isWindowOpen && !planStatus?.submitted;
+  const isWindowClosedNotSubmitted = (!isWindowOpen || isPastCutoff) && !planStatus?.submitted;
+
+  // Calculate if we are near cutoff (e.g., within 30 minutes) using server time offset
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [serverTimeOffset, setServerTimeOffset] = useState(0);
+
+  useEffect(() => {
+    if (windowData?.serverTime) {
+      const serverDate = new Date(windowData.serverTime);
+      const localDate = new Date();
+      setServerTimeOffset(serverDate.getTime() - localDate.getTime());
+    }
+  }, [windowData?.serverTime]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const getMinutesUntilCutoff = () => {
+    const nowOnServer = new Date(currentTime.getTime() + serverTimeOffset);
+    const cutoff = new Date(nowOnServer);
+    cutoff.setHours(12, 30, 0, 0);
+    const diff = cutoff.getTime() - nowOnServer.getTime();
+    return Math.floor(diff / 60000);
+  };
+
+  const minutesUntilCutoff = getMinutesUntilCutoff();
+  const isNearCutoff = minutesUntilCutoff > 0 && minutesUntilCutoff <= 30;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6 bg-slate-950 min-h-screen text-white">
@@ -303,10 +332,10 @@ export default function PlanForDayPage() {
 
           {/* Window status badge */}
           {!showUnselectedForm && (
-            <div className={`hidden lg:flex items-center gap-3 px-6 py-3 rounded-2xl border ${isWindowOpen ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'} backdrop-blur-sm`}>
-              <Clock className={`w-4 h-4 ${isWindowOpen ? 'text-green-400' : 'text-red-400'}`} />
-              <span className={`text-[10px] font-bold uppercase tracking-wider ${isWindowOpen ? 'text-green-400' : 'text-red-400'}`}>
-                {isWindowOpen ? 'Open' : 'Closed'}
+            <div className={`hidden lg:flex items-center gap-3 px-6 py-3 rounded-2xl border ${isWindowOpen && !isPastCutoff ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'} backdrop-blur-sm`}>
+              <Clock className={`w-4 h-4 ${isWindowOpen && !isPastCutoff ? 'text-green-400' : 'text-red-400'}`} />
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${isWindowOpen && !isPastCutoff ? 'text-green-400' : 'text-red-400'}`}>
+                {isWindowOpen && !isPastCutoff ? 'Open' : isPastCutoff ? 'Cutoff Reached' : 'Closed'}
               </span>
             </div>
           )}
@@ -408,10 +437,12 @@ export default function PlanForDayPage() {
               <PowerOff className="w-12 h-12 text-red-500" />
             </div>
             <h1 className="text-3xl font-extrabold mb-4 bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
-              Plan Window Closed
+              {isPastCutoff ? 'Plan Window Closed' : 'Plan Window Closed'}
             </h1>
             <p className="text-slate-400 text-lg mb-8 max-w-sm mx-auto">
-              The plan submission window is currently closed. Please contact your administrator or wait for the window to reopen.
+              {isPastCutoff 
+                ? "Plan closed for today (12:30 PM cutoff)" 
+                : "The plan submission window is currently closed. Please contact your administrator or wait for the window to reopen."}
             </p>
 
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -432,7 +463,22 @@ export default function PlanForDayPage() {
           </motion.div>
         </div>
       ) : !showUnselectedForm ? (
-        <div className="space-y-12">
+        <div className="space-y-6">
+          {/* Near Cutoff Warning */}
+          {isNearCutoff && !planStatus?.submitted && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-center gap-4 text-amber-400"
+            >
+              <Clock className="w-6 h-6 animate-pulse" />
+              <div className="flex-1">
+                <p className="font-black text-sm uppercase tracking-wider">Plan Window Closing Soon!</p>
+                <p className="text-xs font-bold opacity-80">Exactly {minutesUntilCutoff} minute{minutesUntilCutoff !== 1 ? 's' : ''} remaining until 12:30 PM cutoff. Submit now!</p>
+              </div>
+            </motion.div>
+          )}
+
           {/* Main Plan Sections */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-[calc(100vh-450px)] min-h-[500px]">
             {/* Left Panel: Assigned Tasks */}
@@ -448,6 +494,7 @@ export default function PlanForDayPage() {
                     placeholder="Search assigned tasks..."
                     value={assignedTaskSearch}
                     onChange={(e) => setAssignedTaskSearch(e.target.value)}
+                    disabled={isPastCutoff || !isWindowOpen}
                     className="bg-slate-950/50 border-slate-800 pl-10 h-10 rounded-xl text-sm focus:ring-blue-500/50"
                   />
                 </div>
@@ -471,7 +518,7 @@ export default function PlanForDayPage() {
                               ? 'bg-blue-600/20 border-blue-500/50 shadow-[0_0_20px_rgba(59,130,246,0.15)] scale-[1.02]' 
                               : 'bg-slate-800/40 border-slate-700/50 hover:bg-slate-800/80 hover:border-slate-600'
                           }`}
-                          onClick={() => toggleTask(task)}
+                          onClick={() => !isPastCutoff && isWindowOpen && toggleTask(task)}
                         >
                           <div className="flex items-center gap-4">
                             <div className={`w-10 h-10 rounded-xl flex items-center justify-center border transition-colors ${
@@ -511,6 +558,7 @@ export default function PlanForDayPage() {
                     placeholder="Search your plan..."
                     value={plannedTaskSearch}
                     onChange={(e) => setPlannedTaskSearch(e.target.value)}
+                    disabled={isPastCutoff || !isWindowOpen}
                     className="bg-slate-950/50 border-blue-500/20 pl-10 h-10 rounded-xl text-sm focus:ring-blue-500/50 text-blue-100 placeholder:text-blue-900"
                   />
                 </div>
@@ -552,14 +600,15 @@ export default function PlanForDayPage() {
                             <h3 className="font-black text-blue-100">{task.task_name}</h3>
                             <p className="text-xs text-blue-400/60 font-bold uppercase tracking-widest">{task.projectName}</p>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => toggleTask(task)}
-                            className="text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-xl"
-                          >
-                            Cancel
-                          </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => !isPastCutoff && isWindowOpen && toggleTask(task)}
+                              disabled={isPastCutoff || !isWindowOpen}
+                              className="text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-xl"
+                            >
+                              Cancel
+                            </Button>
                         </motion.div>
                       ))}
                     </div>
@@ -573,7 +622,7 @@ export default function PlanForDayPage() {
                  </div>
                  <Button
                   className="w-full py-7 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black text-lg rounded-2xl transition-all shadow-lg shadow-blue-500/20 active:scale-95 flex items-center justify-center gap-3 disabled:opacity-30"
-                  disabled={selectedTasks.length === 0 || !isWindowOpen}
+                  disabled={selectedTasks.length === 0 || !isWindowOpen || isPastCutoff}
                   onClick={handleNext}
                  >
                   LOCK IN MY PLAN
@@ -623,6 +672,7 @@ export default function PlanForDayPage() {
                       <Textarea
                         placeholder="e.g. Waiting for client feedback, Priorities changed..."
                         value={commonReason}
+                        disabled={isPastCutoff || !isWindowOpen}
                         onChange={(e) => setCommonReason(e.target.value)}
                         className="bg-slate-900 border-slate-700 text-white rounded-xl focus:ring-amber-500/50 min-h-[120px] text-lg"
                       />
@@ -631,13 +681,14 @@ export default function PlanForDayPage() {
                       <Label className="text-slate-400 font-bold text-xs uppercase tracking-widest">New Target Due Date *</Label>
                       <div className="relative">
                         <CalendarIcon className="absolute left-4 top-4 w-6 h-6 text-green-500" />
-                        <Input
-                          type="date"
-                          value={commonNewDueDate}
-                          min={today}
-                          onChange={(e) => setCommonNewDueDate(e.target.value)}
-                          className="bg-slate-950 border-slate-800 text-white rounded-xl pl-12 h-16 text-lg"
-                        />
+                          <Input
+                            type="date"
+                            value={commonNewDueDate}
+                            min={today}
+                            disabled={isPastCutoff || !isWindowOpen}
+                            onChange={(e) => setCommonNewDueDate(e.target.value)}
+                            className="bg-slate-950 border-slate-800 text-white rounded-xl pl-12 h-16 text-lg"
+                          />
                       </div>
                       <p className="text-xs text-slate-500 font-medium italic mt-2">
                         This date will be applied to all your postponed tasks for today.
@@ -659,7 +710,7 @@ export default function PlanForDayPage() {
                 <Button 
                   onClick={submitPlan}
                   className="flex-1 py-6 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-black text-lg rounded-2xl shadow-xl shadow-amber-900/20 active:scale-[0.98] flex items-center justify-center gap-3"
-                  disabled={submitPlanMutation.isPending}
+                  disabled={submitPlanMutation.isPending || isPastCutoff || !isWindowOpen}
                 >
                   {submitPlanMutation.isPending ? 'PROCESSING...' : 'SUBMIT PLAN FOR APPROVAL'}
                   <Send className="w-6 h-6" />
