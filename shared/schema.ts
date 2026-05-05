@@ -352,6 +352,8 @@ export const planTasks = pgTable("plan_tasks", {
   isDeviation: boolean("is_deviation").default(false),
   deviationReason: text("deviation_reason"),
   status: text("status").default("approved"), // deviations might need approval
+  source: text("source").default("Manual"), // "Manual" or "PMS"
+  isLocked: boolean("is_locked").default(false),
 });
 
 export const insertDailyPlanSchema = createInsertSchema(dailyPlans).omit({

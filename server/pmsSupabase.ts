@@ -53,6 +53,8 @@ export interface PMSTask {
   assigner_id?: string;
   updated_at?: string;
   progress?: number;
+  schedule_type?: string;
+  schedule_data?: any;
 }
 
 // PMS Subtask interface matching Supabase schema
@@ -244,20 +246,20 @@ export const getTasks = async (projectId?: string, userDepartment?: string, user
     
     console.log(`📋 getTasks auth context: isAdmin=${isAdmin}, userEmpCode=${userEmpCode}, userRole=${userRole}, projectCode=${projectId}`);
 
-    let query = 'SELECT * FROM project_tasks ORDER BY task_name';
+    let query = 'SELECT *, schedule_type, schedule_data FROM project_tasks ORDER BY task_name';
     const params: any[] = [];
 
     if (projectId) {
       // projectId is actually the project_code, need to join with projects table
       // and filter by user assignment if userEmpCode is provided
       query = `
-        SELECT DISTINCT pt.* FROM project_tasks pt
+        SELECT DISTINCT pt.*, pt.schedule_type, pt.schedule_data FROM project_tasks pt
         INNER JOIN projects p ON pt.project_id = p.id
         LEFT JOIN task_members tm ON pt.id = tm.task_id
         LEFT JOIN employees e ON tm.employee_id = e.id
         WHERE p.project_code = $1
           AND (pt.status IS NULL OR LOWER(pt.status) != 'completed')
-          AND (LOWER(TRIM(e.emp_code)) = LOWER(TRIM($2)) OR $2 IS NULL OR $3 = TRUE)
+          AND (LOWER(TRIM(e.emp_code)) = LOWER(TRIM($2)) OR $2 IS NULL OR $3 = TRUE OR tm.task_id IS NULL)
         ORDER BY pt.task_name
       `;
       params.push(projectId, userEmpCode || null, isAdmin);
@@ -299,13 +301,13 @@ export const getTasksByProject = async (projectId: string, userDepartment?: stri
 
     // projectId is the project_code, need to join with projects table
     const result: QueryResult = await pmsPool.query(
-      `SELECT DISTINCT pt.* FROM project_tasks pt
+      `SELECT DISTINCT pt.*, pt.schedule_type, pt.schedule_data FROM project_tasks pt
        INNER JOIN projects p ON pt.project_id = p.id
        LEFT JOIN task_members tm ON pt.id = tm.task_id
        LEFT JOIN employees e ON tm.employee_id = e.id
        WHERE p.project_code = $1
          AND (pt.status IS NULL OR LOWER(pt.status) != 'completed')
-         AND (LOWER(TRIM(e.emp_code)) = LOWER(TRIM($2)) OR $2 IS NULL OR $3 = TRUE)
+         AND (LOWER(TRIM(e.emp_code)) = LOWER(TRIM($2)) OR $2 IS NULL OR $3 = TRUE OR tm.task_id IS NULL)
        ORDER BY pt.task_name`,
       [projectId, userEmpCode || null, isAdmin]
     );

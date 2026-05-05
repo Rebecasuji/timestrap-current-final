@@ -1358,6 +1358,35 @@ export async function registerRoutes(
     }
   });
 
+// Helper to determine if a PMS task should be auto-synced based on its schedule
+function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
+  if (!task.schedule_type || task.schedule_type === 'None') return false;
+
+  const targetDate = new Date(targetDateStr);
+  const dayName = format(targetDate, 'EEEE'); // e.g. "Monday"
+  const dayOfMonth = targetDate.getDate();
+
+  switch (task.schedule_type) {
+    case 'Daily':
+      return true;
+    case 'Weekly':
+      const weeklyDays = Array.isArray(task.schedule_data?.weekdays) ? task.schedule_data.weekdays : [];
+      return weeklyDays.includes(dayName);
+    case 'Monthly':
+      const monthlyDates = Array.isArray(task.schedule_data?.dates) ? task.schedule_data.dates : [];
+      return monthlyDates.includes(dayOfMonth);
+    case 'Custom':
+      if (!task.start_date || !task.end_date) return false;
+      const start = new Date(task.start_date);
+      const end = new Date(task.end_date);
+      // Normalize to compare just dates
+      const t = new Date(targetDateStr).getTime();
+      return t >= start.getTime() && t <= end.getTime();
+    default:
+      return false;
+  }
+}
+
   // Return pending tasks assigned to employee that are due on given date and not completed
   app.get('/api/pending-deadline-tasks', async (req, res) => {
     try {
@@ -1778,6 +1807,35 @@ export async function registerRoutes(
 
       // Portal is manually OPEN and not past cutoff - allow submissions
 
+      // Enforce auto-selected PMS tasks are included
+      const { getProjects } = await import('./pmsSupabase');
+      const employee = await storage.getEmployee(employeeId);
+      if (employee) {
+        const userDept = employee.department || '';
+        const projects = await getProjects(employee.role, employee.employeeCode, userDept);
+        const { getTasks } = await import('./pmsSupabase');
+        const getISTTodayKey = (): string => {
+          const now = new Date();
+          const istMs = now.getTime() + (5.5 * 60 * 60 * 1000); // shift to IST
+          return new Date(istMs).toISOString().substring(0, 10);
+        };
+        const todayKey = getISTTodayKey();
+
+        for (const project of projects) {
+          const projectTasks = await getTasks(project.project_code, userDept, employee.employeeCode);
+          const mandatoryTasks = projectTasks.filter(t => shouldSyncPMSTask(t, todayKey));
+          for (const mt of mandatoryTasks) {
+            const isIncluded = selectedTasks.some((st: any) => st.id === mt.id);
+            if (!isIncluded) {
+              return res.status(400).json({ 
+                error: `Mandatory PMS task '${mt.task_name}' is missing from your plan.`,
+                taskId: mt.id
+              });
+            }
+          }
+        }
+      }
+
       // Plan window is always open unless explicitly restricted by other future logic
       const isInTimeWindow = true; 
       let plan;
@@ -1801,7 +1859,9 @@ export async function registerRoutes(
           projectName: t.projectName || t.project_code,
           taskName: t.task_name,
           isDeviation: false,
-          status: 'approved'
+          status: 'approved',
+          source: t.source || 'Manual',
+          isLocked: !!t.isLocked
         });
       }
 
@@ -2188,24 +2248,14 @@ export async function registerRoutes(
       const todayKey = getISTTodayKey();
 
       for (const project of projects) {
-        console.log(`[AVAILABLE-TASKS] Fetching tasks for project: ${project.project_code} (${project.project_name}) for employee: ${employee.employeeCode}`);
-        const projectTasks = await getTasks(project.project_code, userDepartment, employee.employeeCode);
-        console.log(`[AVAILABLE-TASKS] Total tasks retrieved for project ${project.project_code}: ${projectTasks.length}`);
-
-        // Filter out completed tasks
-        const activeTasks = projectTasks;
-        console.log("[AVAILABLE-TASKS] Active tasks for project:", activeTasks.length);
-        if (activeTasks.length === 0) {
-          console.log("[AVAILABLE-TASKS] All tasks for this project are completed.");
-        }
-
-        tasksWithProjects.push(...activeTasks.map((task: any) => {
-          // Extract plain YYYY-MM-DD from stored dates to avoid timezone-based day shifts
+        const projectTasks = await getTasks(project.project_code, userDepartment, employee.employeeCode, employee.role);
+        const activeTasks = projectTasks.map((task: any) => {
           const projectKey = extractDatePart(project.end_date);
           const isProjectOverdue = projectKey ? projectKey < todayKey : false;
-
           const taskKey = extractDatePart(task.end_date);
           const isTaskOverdue = taskKey ? taskKey < todayKey : false;
+
+          const isAutoSelected = shouldSyncPMSTask(task, todayKey);
 
           return {
             ...task,
@@ -2217,8 +2267,13 @@ export async function registerRoutes(
             isProjectOverdue: isProjectOverdue || false,
             isTaskOverdue: isTaskOverdue || false,
             isOverdue: (isTaskOverdue || isProjectOverdue) ? true : false,
+            source: "PMS",
+            isLocked: isAutoSelected,
+            isAutoSelected: isAutoSelected
           };
-        }));
+        });
+
+        tasksWithProjects.push(...activeTasks);
       }
 
       console.log("[AVAILABLE-TASKS] Total tasks to return:", tasksWithProjects.length);
