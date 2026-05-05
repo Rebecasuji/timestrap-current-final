@@ -243,10 +243,18 @@ export default function PlanForDayPage() {
   };
 
   const getMinutesUntilCutoff = () => {
-    const nowOnServer = new Date(currentTime.getTime() + serverTimeOffset);
-    const cutoff = new Date(nowOnServer);
-    cutoff.setHours(12, 30, 0, 0);
-    const diff = cutoff.getTime() - nowOnServer.getTime();
+    // Current time on server
+    const serverNow = new Date(currentTime.getTime() + serverTimeOffset);
+    
+    // Normalize to IST for cutoff comparison
+    const utcTime = serverNow.getTime() + (serverNow.getTimezoneOffset() * 60000);
+    const istNow = new Date(utcTime + (5.5 * 60 * 60 * 1000));
+    
+    // Target cutoff: 12:30 PM IST on the same IST day
+    const istCutoff = new Date(istNow);
+    istCutoff.setUTCHours(12, 30, 0, 0);
+    
+    const diff = istCutoff.getTime() - istNow.getTime();
     return Math.floor(diff / 60000);
   };
 
@@ -254,47 +262,40 @@ export default function PlanForDayPage() {
   const isNearCutoff = minutesUntilCutoff > 0 && minutesUntilCutoff <= 30;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6 bg-slate-950 min-h-screen text-white">
-      <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-2">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight flex items-center gap-3">
-            <ClipboardList className="w-8 h-8 text-blue-500" />
-            PLAN FOR THE DAY
-          </h1>
-          <p className="text-slate-400 font-medium">Capture your objectives and manage deviations</p>
+    <div className="min-h-screen bg-[#020617] text-white p-4 md:p-8">
+      <header className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between mb-12 gap-6">
+        <div className="flex items-center gap-6">
+          <div className="w-16 h-16 bg-blue-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-blue-500/20">
+            <ClipboardList className="w-8 h-8 text-white" />
+          </div>
+          <div>
+            <h1 className="text-4xl font-black tracking-tight" style={{ fontFamily: 'Space Grotesk' }}>PLAN FOR TODAY</h1>
+            <p className="text-slate-400 font-bold uppercase text-xs tracking-widest mt-1 flex items-center gap-2">
+              <CalendarIcon className="w-4 h-4 text-blue-500" /> {format(new Date(), 'EEEE, MMMM do')}
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-4">
-           <div className="bg-slate-900/80 p-1.5 rounded-2xl flex items-center border border-slate-800 shadow-lg">
-             <button 
-                onClick={() => setActiveTab('plan')}
-                className={`px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-                  activeTab === 'plan' ? 'bg-blue-600 text-white' : 'text-slate-500'
-                }`}
-             >
-                Daily Plan
-             </button>
-             <button 
-                onClick={() => setActiveTab('history')}
-                className={`px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
-                  activeTab === 'history' ? 'bg-indigo-600 text-white' : 'text-slate-500'
-                }`}
-             >
-                History
-             </button>
-           </div>
-
-          <div className={`hidden lg:flex items-center gap-3 px-6 py-3 rounded-2xl border ${isWindowOpen && !isPastCutoff ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'} backdrop-blur-sm`}>
-            <Clock className={`w-4 h-4 ${isWindowOpen && !isPastCutoff ? 'text-green-400' : 'text-red-400'}`} />
-            <span className={`text-[10px] font-bold uppercase tracking-wider ${isWindowOpen && !isPastCutoff ? 'text-green-400' : 'text-red-400'}`}>
-              {isWindowOpen && !isPastCutoff ? 'Open' : isPastCutoff ? 'Cutoff Reached' : 'Closed'}
-            </span>
-          </div>
-
-          {(user?.employeeCode === 'E0046' || user?.employeeCode === 'E0048') && (
-            <div className="flex items-center gap-2">
-              <Button onClick={() => sendReminderMutation.mutate()} variant="outline" className="rounded-xl font-bold text-xs">Alert</Button>
-              <Button onClick={() => sendEODReportMutation.mutate()} variant="outline" className="rounded-xl font-bold text-xs">EOD Report</Button>
+        <div className="flex items-center gap-3 bg-slate-900/50 p-2 rounded-2xl border border-slate-800">
+          <Button
+            variant="ghost"
+            onClick={() => setActiveTab('plan')}
+            className={`rounded-xl font-black text-xs px-6 py-5 ${activeTab === 'plan' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400'}`}
+          >
+            DAILY PLAN
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setActiveTab('history')}
+            className={`rounded-xl font-black text-xs px-6 py-5 ${activeTab === 'history' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400'}`}
+          >
+            PLAN HISTORY
+          </Button>
+          
+          {isController && (
+            <div className="flex gap-2 ml-4 pl-4 border-l border-slate-800">
+               <Button onClick={() => sendReminderMutation.mutate()} size="sm" variant="outline" className="rounded-xl border-amber-500/20 text-amber-500 hover:bg-amber-500/10">Remind All</Button>
+               <Button onClick={() => sendEODReportMutation.mutate()} size="sm" variant="outline" className="rounded-xl border-green-500/20 text-green-500 hover:bg-green-500/10">EOD Report</Button>
             </div>
           )}
 
@@ -358,6 +359,18 @@ export default function PlanForDayPage() {
               </CardHeader>
               <ScrollArea className="flex-1 p-4">
                 <div className="space-y-3">
+                  {filteredAvailableTasks.length === 0 && !isLoadingTasks && (
+                    <div className="py-20 text-center space-y-4">
+                      <PlannedTaskSearchIcon className="w-12 h-12 text-slate-800 mx-auto" />
+                      <p className="text-slate-500 font-medium">No manual tasks available.</p>
+                      <div className="p-4 bg-slate-900/50 rounded-xl border border-slate-800 text-[10px] text-slate-600 text-left font-mono">
+                        DEBUG INFO:<br/>
+                        User: {user?.name} ({user?.employeeCode})<br/>
+                        Dept: {user?.department || 'Not Set'}<br/>
+                        ID: {user?.id}
+                      </div>
+                    </div>
+                  )}
                   {filteredAvailableTasks.map((task: any) => {
                     const isSelected = selectedTasks.find(t => t.id === task.id);
                     return (

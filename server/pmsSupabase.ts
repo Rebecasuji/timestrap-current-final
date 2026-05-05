@@ -217,7 +217,12 @@ export const getProjects = async (userRole?: string, userEmpCode?: string, userD
         // Check if user's department matches any of the project's departments
         const isMatch = projectDepts.some(dept => isDepartmentMatch(userDepartment, dept));
         if (isMatch) {
-          console.log(`✅ Project "${project.project_name}" depts [${projectDepts.join(', ')}] matches "${userDepartment}"`);
+          console.log(`✅ [PMS] Project "${project.project_name}" matches department "${userDepartment}"`);
+        } else {
+          // Extra log for debugging
+          if (projectDepts.length > 0) {
+            console.log(`❌ [PMS] Project "${project.project_name}" depts [${projectDepts.join(', ')}] do NOT match "${userDepartment}"`);
+          }
         }
         return isMatch;
       });
@@ -277,18 +282,52 @@ export const getTasks = async (projectId?: string, userDepartment?: string, user
 
     const result: QueryResult = await pmsPool.query(query, params);
     let tasks = result.rows as PMSTask[] || [];
-
-    console.log(`📊 PMS tasks returned: ${tasks.length} tasks`);
-    if (tasks.length > 0) {
-      console.log("📋 First task sample:", JSON.stringify(tasks[0], null, 2));
-    } else {
-      console.log("⚠️ No tasks found in PMS database");
-    }
-
     return tasks;
   } catch (error) {
     console.error("💥 Error connecting to PMS:", error);
     return []; // Return empty array on connection issues
+  }
+};
+
+export const getDepartmentTasks = async (userDepartment: string, userEmpCode: string, userRole: string): Promise<any[]> => {
+  try {
+    console.log("📡 Executing PMS getDepartmentTasks query for dept:", userDepartment);
+    
+    const isAdmin = userRole === 'admin' || userEmpCode === 'E0001' || userEmpCode === 'E0046' || userEmpCode === 'E0002' || userEmpCode === 'E0048';
+    
+    // Fetch all projects in the department first to get their metadata
+    const projects = await getProjects(userRole, userEmpCode, userDepartment);
+    if (projects.length === 0) return [];
+
+    const projectIds = projects.map(p => p.id);
+    const projectMap = projects.reduce((acc, p) => {
+      acc[p.id] = p;
+      return acc;
+    }, {} as Record<string, any>);
+
+    // Fetch all tasks for these projects that the user can see
+    const query = `
+      SELECT DISTINCT pt.*, pt.schedule_type, pt.schedule_data FROM project_tasks pt
+      INNER JOIN projects p ON pt.project_id = p.id
+      LEFT JOIN task_members tm ON pt.id = tm.task_id
+      LEFT JOIN employees e ON tm.employee_id = e.id
+      WHERE pt.project_id = ANY($1)
+        AND (pt.status IS NULL OR LOWER(pt.status) != 'completed')
+        AND (LOWER(TRIM(e.emp_code)) = LOWER(TRIM($2)) OR $2 IS NULL OR $3 = TRUE OR tm.task_id IS NULL)
+      ORDER BY pt.task_name
+    `;
+    
+    const result: QueryResult = await pmsPool.query(query, [projectIds, userEmpCode || null, isAdmin]);
+    const tasks = result.rows || [];
+
+    // Enrich tasks with project info
+    return tasks.map(task => ({
+      ...task,
+      project: projectMap[task.project_id]
+    }));
+  } catch (error) {
+    console.error("💥 Error in getDepartmentTasks:", error);
+    return [];
   }
 };
 

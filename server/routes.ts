@@ -5,7 +5,7 @@ import { storage } from "./storage";
 import { promises as fs } from "fs";
 import path from "path";   // ✅ KEEP THIS
 import { pool } from "./db";
-import { pmsPool, saveSiteReportToPMS, getTasks } from "./pmsSupabase";
+import { pmsPool, saveSiteReportToPMS, getTasks, type PMSTask } from "./pmsSupabase";
 import { getLMSHours } from "./lmsSupabase";
 import { format, parseISO, eachDayOfInterval, isSameDay } from "date-fns";
 
@@ -57,12 +57,18 @@ function isProjectExpired(endDate: string | null): boolean {
   }
 }
 
-// Helper function to check if plan window should be closed (after 12:30 PM)
 function isAfterPlanCutoff(): boolean {
   const now = new Date();
-  const cutoff = new Date(now);
-  cutoff.setHours(12, 30, 0, 0);
-  return now >= cutoff;
+  // Normalize to UTC first, then add IST offset (5.5h)
+  const utcNow = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const istNow = new Date(utcNow + (5.5 * 60 * 60 * 1000));
+  
+  // Use UTC methods to get the "local" components of the shifted date
+  const hours = istNow.getUTCHours();
+  const minutes = istNow.getUTCMinutes();
+  
+  // Return true if current time in IST is past 12:30 PM
+  return (hours > 12) || (hours === 12 && minutes >= 30);
 }
 
 async function enrichEntry(e: any) {
@@ -429,8 +435,8 @@ export async function registerRoutes(
 
   // ============ KEY STEPS ROUTE (PMS) ============
   app.get('/api/key-steps', async (req, res) => {
+    const { projectId } = req.query;
     try {
-      const { projectId } = req.query;
       if (!projectId) return res.json([]);
 
       // Query PMS DB for key steps tied to the project code
@@ -1726,7 +1732,11 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
   // ---- Plan Window Control (E0046 only) ----
   app.get("/api/plan-window", async (_req, res) => {
     const settings = await readSettings();
-    const today = format(new Date(), "yyyy-MM-dd");
+    const now = new Date();
+    const utcNow = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const istNow = new Date(utcNow + (5.5 * 60 * 60 * 1000));
+    const today = format(istNow, "yyyy-MM-dd");
+    
     const isAutomatedClosed = await storage.isDailyPlanClosed(today);
     const isPastCutoff = isAfterPlanCutoff();
     
@@ -1816,13 +1826,15 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
         const { getTasks } = await import('./pmsSupabase');
         const getISTTodayKey = (): string => {
           const now = new Date();
-          const istMs = now.getTime() + (5.5 * 60 * 60 * 1000); // shift to IST
-          return new Date(istMs).toISOString().substring(0, 10);
+          // Adjust for IST (UTC+5.5) regardless of server locale
+          const utcNow = now.getTime() + (now.getTimezoneOffset() * 60000);
+          const istNow = new Date(utcNow + (5.5 * 60 * 60 * 1000));
+          return istNow.toISOString().split('T')[0];
         };
         const todayKey = getISTTodayKey();
 
         for (const project of projects) {
-          const projectTasks = await getTasks(project.project_code, userDept, employee.employeeCode);
+          const projectTasks = await getTasks(project.project_code, userDept, employee.employeeCode, employee.role);
           const mandatoryTasks = projectTasks.filter(t => shouldSyncPMSTask(t, todayKey));
           for (const mt of mandatoryTasks) {
             const isIncluded = selectedTasks.some((st: any) => st.id === mt.id);
@@ -2215,18 +2227,23 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
       // Get employee info to get department
       const employee = await storage.getEmployee(employeeId);
       if (!employee) {
-        console.log("[AVAILABLE-TASKS] Employee not found:", employeeId);
+        console.error("[AVAILABLE-TASKS] Employee not found in database:", employeeId);
         return res.status(404).json({ error: "Employee not found" });
       }
 
-      console.log("[AVAILABLE-TASKS] Employee found:", { id: employee.id, department: employee.department, role: employee.role });
+      console.log("[AVAILABLE-TASKS] Fetching for employee:", { 
+        name: employee.name, 
+        code: employee.employeeCode, 
+        dept: employee.department,
+        role: employee.role 
+      });
 
       const userDepartment = employee.department || '';
 
       // Get projects for this employee's department
       const { getProjects } = await import('./pmsSupabase');
       const projects = await getProjects(employee.role, employee.employeeCode, userDepartment);
-      console.log("[AVAILABLE-TASKS] Projects retrieved:", projects.length);
+      console.log(`[AVAILABLE-TASKS] Found ${projects.length} projects for department "${userDepartment}"`);
 
       // Fetch tasks for each project and group them
       const { getTasks } = await import('./pmsSupabase');
@@ -2242,41 +2259,46 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
       // Compute today's date in IST (UTC+5:30) so the server's UTC clock doesn't cause off-by-one day errors
       const getISTTodayKey = (): string => {
         const now = new Date();
-        const istMs = now.getTime() + (5.5 * 60 * 60 * 1000); // shift to IST
-        return new Date(istMs).toISOString().substring(0, 10);
+        const utcNow = now.getTime() + (now.getTimezoneOffset() * 60000);
+        const istNow = new Date(utcNow + (5.5 * 60 * 60 * 1000));
+        return istNow.toISOString().split('T')[0];
       };
       const todayKey = getISTTodayKey();
 
-      for (const project of projects) {
-        const projectTasks = await getTasks(project.project_code, userDepartment, employee.employeeCode, employee.role);
-        const activeTasks = projectTasks.map((task: any) => {
-          const projectKey = extractDatePart(project.end_date);
-          const isProjectOverdue = projectKey ? projectKey < todayKey : false;
-          const taskKey = extractDatePart(task.end_date);
-          const isTaskOverdue = taskKey ? taskKey < todayKey : false;
+      // Fetch all tasks for the department in a single query
+      const { getDepartmentTasks } = await import('./pmsSupabase');
+      const allProjectTasks = await getDepartmentTasks(userDepartment, employee.employeeCode, employee.role);
+      
+      console.log(`[AVAILABLE-TASKS] Found ${allProjectTasks.length} tasks across all projects`);
 
-          const isAutoSelected = shouldSyncPMSTask(task, todayKey);
+      for (const task of allProjectTasks) {
+        const project = task.project;
+        if (!project) continue;
 
-          return {
-            ...task,
-            projectCode: project.project_code,
-            projectName: project.project_name,
-            projectDescription: project.description,
-            projectDeadline: project.end_date || null,
-            taskDeadline: task.end_date || null,
-            isProjectOverdue: isProjectOverdue || false,
-            isTaskOverdue: isTaskOverdue || false,
-            isOverdue: (isTaskOverdue || isProjectOverdue) ? true : false,
-            source: "PMS",
-            isLocked: isAutoSelected,
-            isAutoSelected: isAutoSelected
-          };
+        const projectKey = extractDatePart(project.end_date);
+        const isProjectOverdue = projectKey ? projectKey < todayKey : false;
+        const taskKey = extractDatePart(task.end_date);
+        const isTaskOverdue = taskKey ? taskKey < todayKey : false;
+
+        const isAutoSelected = shouldSyncPMSTask(task, todayKey);
+
+        tasksWithProjects.push({
+          ...task,
+          projectCode: project.project_code,
+          projectName: project.project_name,
+          projectDescription: project.description,
+          projectDeadline: project.end_date || null,
+          taskDeadline: task.end_date || null,
+          isProjectOverdue: isProjectOverdue || false,
+          isTaskOverdue: isTaskOverdue || false,
+          isOverdue: (isTaskOverdue || isProjectOverdue) ? true : false,
+          source: "PMS",
+          isLocked: isAutoSelected,
+          isAutoSelected: isAutoSelected
         });
-
-        tasksWithProjects.push(...activeTasks);
       }
 
-      console.log("[AVAILABLE-TASKS] Total tasks to return:", tasksWithProjects.length);
+      console.log(`[AVAILABLE-TASKS] Total tasks processed for ${employee.name}: ${tasksWithProjects.length}`);
       res.json(tasksWithProjects);
     } catch (error) {
       console.error("[AVAILABLE-TASKS] Error:", error);
