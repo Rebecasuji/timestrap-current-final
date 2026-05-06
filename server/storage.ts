@@ -1,5 +1,5 @@
 import { db, pool } from "./db";
-import { eq, desc, and, gte, lte } from "drizzle-orm";
+import { eq, desc, and, gte, lte, inArray } from "drizzle-orm";
 import {
   organisations,
   employees,
@@ -158,6 +158,7 @@ export interface IStorage {
   getDailySubmissionByDate(employeeId: string, date: string): Promise<DailySubmission | undefined>;
   getDailySubmissionsByDate(date: string): Promise<DailySubmission[]>;
   getDailySubmissionsByDateRange(startDate: string, endDate: string): Promise<DailySubmission[]>;
+  getBatchPlanTasksByPlanIds(planIds: string[]): Promise<PlanTask[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -854,6 +855,11 @@ export class DatabaseStorage implements IStorage {
   async isDailyPlanClosed(date: string): Promise<boolean> {
     const [settings] = await db.select().from(dailyPlanSettings).where(eq(dailyPlanSettings.date, date));
     return settings?.isClosed || false;
+  }
+
+  async getBatchPlanTasksByPlanIds(planIds: string[]): Promise<PlanTask[]> {
+    if (planIds.length === 0) return [];
+    return await db.select().from(planTasks).where(inArray(planTasks.planId, planIds));
   }
 }
 

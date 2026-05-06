@@ -71,36 +71,76 @@ function isAfterPlanCutoff(): boolean {
   return (hours > 12) || (hours === 12 && minutes >= 30);
 }
 
-async function enrichEntry(e: any) {
-  let keyStepName: string | null = null;
-  let pmsStartDate: string | null = null;
-  let pmsEndDate: string | null = null;
+// Batch enrich entries to avoid N+1 query problem
+async function batchEnrichEntries(entries: any[]) {
+  if (entries.length === 0) return [];
+
+  const subtaskIds = entries.filter(e => e.pmsSubtaskId).map(e => e.pmsSubtaskId);
+  const directTaskIds = entries.filter(e => e.pmsId && !e.pmsSubtaskId).map(e => e.pmsId);
+
+  const subtaskMap = new Map<string, string>(); // subtaskId -> taskId
+  const taskDetailsMap = new Map<string, { keyStepId: string | null, startDate: string | null, endDate: string | null }>();
+  const keyStepMap = new Map<string, string>(); // keyStepId -> title
+
   try {
-    let taskId = null;
-    if (e.pmsSubtaskId) {
-      const subRes = await pmsPool.query('SELECT task_id FROM subtasks WHERE id = $1::uuid', [e.pmsSubtaskId]);
-      if (subRes.rows && subRes.rows.length > 0) {
-        taskId = subRes.rows[0].task_id;
-      }
-    } else if (e.pmsId) {
-      taskId = e.pmsId;
+    // 1. Fetch subtasks to get their parent task IDs
+    if (subtaskIds.length > 0) {
+      const subRes = await pmsPool.query('SELECT id, task_id FROM subtasks WHERE id = ANY($1::uuid[])', [subtaskIds]);
+      subRes.rows.forEach(row => subtaskMap.set(row.id, row.task_id));
     }
 
-    if (taskId) {
-      const taskRes = await pmsPool.query('SELECT key_step_id, start_date, end_date FROM project_tasks WHERE id = $1::uuid', [taskId]);
-      if (taskRes.rows && taskRes.rows.length > 0) {
-        pmsStartDate = taskRes.rows[0].start_date;
-        pmsEndDate = taskRes.rows[0].end_date;
-        if (taskRes.rows[0].key_step_id) {
-          const keyRes = await pmsPool.query('SELECT title FROM key_steps WHERE id = $1::uuid', [taskRes.rows[0].key_step_id]);
-          if (keyRes.rows && keyRes.rows.length > 0) keyStepName = keyRes.rows[0].title;
-        }
-      }
+    // 2. Collect all unique task IDs (direct + from subtasks)
+    const allTaskIds = Array.from(new Set([...directTaskIds, ...Array.from(subtaskMap.values())]));
+
+    // 3. Fetch task details
+    if (allTaskIds.length > 0) {
+      const taskRes = await pmsPool.query('SELECT id, key_step_id, start_date, end_date FROM project_tasks WHERE id = ANY($1::uuid[])', [allTaskIds]);
+      taskRes.rows.forEach(row => taskDetailsMap.set(row.id, {
+        keyStepId: row.key_step_id,
+        startDate: row.start_date,
+        endDate: row.end_date
+      }));
+    }
+
+    // 4. Collect all unique key step IDs
+    const allKeyStepIds = Array.from(new Set(
+      Array.from(taskDetailsMap.values())
+        .map(t => t.keyStepId)
+        .filter(id => id !== null)
+    )) as string[];
+
+    // 5. Fetch key step titles
+    if (allKeyStepIds.length > 0) {
+      const keyRes = await pmsPool.query('SELECT id, title FROM key_steps WHERE id = ANY($1::uuid[])', [allKeyStepIds]);
+      keyRes.rows.forEach(row => keyStepMap.set(row.id, row.title));
     }
   } catch (err) {
-    console.error('[PMS-ENRICH] failed to resolve key step for entry', e.id, err);
+    console.error('[PMS-BATCH-ENRICH] failed to resolve batch data', err);
   }
-  return { ...e, keyStep: e.keyStep || keyStepName, pmsStartDate, pmsEndDate };
+
+  // 6. Map back to entries
+  return entries.map(e => {
+    let taskId = e.pmsId;
+    if (e.pmsSubtaskId) {
+      taskId = subtaskMap.get(e.pmsSubtaskId) || null;
+    }
+
+    const details = taskId ? taskDetailsMap.get(taskId) : null;
+    const keyStepName = details?.keyStepId ? keyStepMap.get(details.keyStepId) : null;
+
+    return {
+      ...e,
+      keyStep: e.keyStep || keyStepName,
+      pmsStartDate: details?.startDate || null,
+      pmsEndDate: details?.endDate || null
+    };
+  });
+}
+
+// Keep single enrichment for individual item routes
+async function enrichEntry(e: any) {
+  const enriched = await batchEnrichEntries([e]);
+  return enriched[0];
 }
 
 export async function registerRoutes(
@@ -476,8 +516,8 @@ export async function registerRoutes(
     try {
       const entries = await storage.getTimeEntries();
 
-      // Enrich entries with key step name from PMS (if linked via pmsId or pmsSubtaskId)
-      const enriched = await Promise.all(entries.map(e => enrichEntry(e)));
+      // Batch enrich entries with key step name from PMS (if linked via pmsId or pmsSubtaskId)
+      const enriched = await batchEnrichEntries(entries);
       res.json(enriched);
     } catch (error) {
       console.error("Get time entries error:", error);
@@ -498,7 +538,7 @@ export async function registerRoutes(
   app.get("/api/time-entries/employee/:employeeId", async (req, res) => {
     try {
       const entries = await storage.getTimeEntriesByEmployee(req.params.employeeId);
-      const enriched = await Promise.all(entries.map(e => enrichEntry(e)));
+      const enriched = await batchEnrichEntries(entries);
       res.json(enriched);
     } catch (error) {
       console.error("Get employee entries error:", error);
@@ -2178,22 +2218,63 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
   app.get("/api/daily-plans/all", async (req, res) => {
     try {
       const plans = await storage.getAllDailyPlans();
-      const enrichedPlans = await Promise.all(plans.map(async (p: any) => {
-        const employee = await storage.getEmployee(p.employeeId);
-        const tasks = await storage.getPlanTasks(p.id);
-        // Fetch postponements for this employee on this date
-        const postponements = await pool.query(
-          `SELECT task_name, reason, new_due_date FROM task_postponements WHERE postponed_by = $1 AND DATE(postponed_at) = $2::date`,
-          [p.employeeId, p.date]
+      if (plans.length === 0) return res.json([]);
+
+      const employeeIds = Array.from(new Set(plans.map(p => p.employeeId)));
+      const planIds = plans.map(p => p.id);
+
+      // 1. Batch fetch employees
+      const employeeMap = new Map<string, any>();
+      const allEmps = await storage.getEmployees();
+      allEmps.forEach(e => employeeMap.set(e.id, e));
+
+      // 2. Batch fetch plan tasks
+      const tasksByPlan = new Map<string, any[]>();
+      try {
+        const allTasks = await storage.getBatchPlanTasksByPlanIds(planIds);
+        allTasks.forEach(t => {
+          const list = tasksByPlan.get(t.planId) || [];
+          list.push(t);
+          tasksByPlan.set(t.planId, list);
+        });
+      } catch (e) {
+        console.error("Batch plan tasks fetch failed:", e);
+      }
+
+      // 3. Batch fetch postponements
+      const postponementsByEmpDate = new Map<string, any[]>();
+      try {
+        const postRes = await pool.query(
+          `SELECT task_name, reason, new_due_date, postponed_by, DATE(postponed_at)::text as p_date 
+           FROM task_postponements 
+           WHERE postponed_by = ANY($1::varchar[])`,
+          [employeeIds]
         );
+        postRes.rows.forEach(row => {
+          const key = `${row.postponed_by}_${row.p_date}`;
+          const list = postponementsByEmpDate.get(key) || [];
+          list.push(row);
+          postponementsByEmpDate.set(key, list);
+        });
+      } catch (e) {
+        console.error("Batch postponements fetch failed:", e);
+      }
+
+      const enrichedPlans = plans.map(p => {
+        const employee = employeeMap.get(p.employeeId);
+        const tasks = tasksByPlan.get(p.id) || [];
+        const postKey = `${p.employeeId}_${p.date}`;
+        const postponedTasks = postponementsByEmpDate.get(postKey) || [];
+
         return {
           ...p,
           employeeName: employee?.name || 'Unknown',
           employeeCode: employee?.employeeCode || 'Unknown',
           tasks,
-          postponedTasks: postponements.rows || []
+          postponedTasks
         };
-      }));
+      });
+
       res.json(enrichedPlans);
     } catch (error) {
       console.error("Get all daily plans error:", error);

@@ -370,61 +370,33 @@ export const getSubtasks = async (taskId?: string, userDepartment?: string, user
   try {
     console.log("🔍 PMS getSubtasks called with taskId:", taskId, "userDepartment:", userDepartment, "userEmpCode:", userEmpCode);
 
-    console.log("📡 Executing PMS getSubtasks query (fetching all subtasks)...");
-
-    // Enhanced query to join employees for subtask assignment matching
-    const result: QueryResult = await pmsPool.query(`
+    let query = `
       SELECT s.*, e.emp_code as assigned_emp_code 
       FROM subtasks s
       LEFT JOIN employees e ON s.assigned_to::text = e.id::text OR s.assigned_to::text = e.emp_code::text
-    `);
+      WHERE (s.is_completed = false OR s.is_completed IS NULL)
+        AND (s.progress < 100 OR s.progress IS NULL)
+    `;
+    const params: any[] = [];
+    let paramIdx = 1;
+
+    if (taskId) {
+      query += ` AND s.task_id = $${paramIdx}::uuid`;
+      params.push(taskId);
+      paramIdx++;
+    }
+
+    if (userEmpCode) {
+      query += ` AND (LOWER(s.assigned_to::text) = LOWER($${paramIdx}) OR LOWER(e.emp_code) = LOWER($${paramIdx}))`;
+      params.push(userEmpCode);
+      paramIdx++;
+    }
+
+    console.log("📡 Executing optimized PMS getSubtasks query...");
+    const result: QueryResult = await pmsPool.query(query, params);
 
     let subtasks = result.rows as PMSSubtask[] || [];
     console.log(`📊 PMS subtasks returned: ${subtasks.length} subtasks`);
-
-    if (subtasks.length > 0) {
-      console.log("📋 First subtask sample:", JSON.stringify(subtasks[0], null, 2));
-
-      // Filter by taskId and non-completed status
-      if (taskId) {
-        console.log(`🔍 Filtering subtasks for taskId: ${taskId}`);
-        subtasks = subtasks.filter(subtask => {
-          const sTaskId = String(subtask.task_id || (subtask as any).taskid || (subtask as any).task ||
-            (subtask as any).parent_task_id || (subtask as any).parent_task ||
-            (subtask as any).task_ref || (subtask as any).taskId).toLowerCase();
-          const targetId = String(taskId).toLowerCase();
-
-          // Match taskId AND ensure subtask is not fully completed
-          const isTaskMatch = sTaskId === targetId;
-          const isNotCompleted = !subtask.is_completed && (subtask.progress === undefined || subtask.progress < 100);
-
-          // Match assignment if userEmpCode is provided
-          // Match assignment if userEmpCode is provided - check both UUID match (via joined emp_code) and direct code match
-          const isAssigned = !userEmpCode || 
-            (subtask.assigned_to && (
-              String(subtask.assigned_to).toLowerCase() === String(userEmpCode).toLowerCase() ||
-              String((subtask as any).assigned_emp_code).toLowerCase() === String(userEmpCode).toLowerCase()
-            ));
-
-          return isTaskMatch && isNotCompleted && isAssigned;
-        });
-        console.log(`📊 Filtered to ${subtasks.length} active/assigned subtasks for task ${taskId}`);
-      } else {
-        // If no taskId, still filter by assignment and completion
-        subtasks = subtasks.filter(s => {
-          const isNotCompleted = !s.is_completed && (s.progress === undefined || s.progress < 100);
-          const isAssigned = !userEmpCode || 
-            (s.assigned_to && (
-              String(s.assigned_to).toLowerCase() === String(userEmpCode).toLowerCase() ||
-              String((s as any).assigned_emp_code).toLowerCase() === String(userEmpCode).toLowerCase()
-            ));
-          return isNotCompleted && isAssigned;
-        });
-      }
-    } else {
-      console.log("⚠️ No subtasks found in PMS database");
-    }
-
     return subtasks;
   } catch (error) {
     console.error("💥 Error connecting to PMS:", error);
