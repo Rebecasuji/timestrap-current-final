@@ -30,7 +30,7 @@ export default function PlanForDayPage() {
   const [serverTimeOffset, setServerTimeOffset] = useState(0);
 
   const today = format(new Date(), 'yyyy-MM-dd');
-  const isController = user?.employeeCode === 'E0046';
+  const isController = user?.role === 'admin' || user?.role === 'manager' || user?.employeeCode === 'E0046';
 
   // Fetch plan window status from server
   const { data: windowData, refetch: refetchWindowStatus } = useQuery({
@@ -79,9 +79,8 @@ export default function PlanForDayPage() {
   // Window and Cutoff computations
   const isWindowOpen = !!windowData?.planWindowOpen;
   const isPastCutoff = !!windowData?.isPastCutoff;
-  const isOverrideToday = !!windowData?.isOverrideToday;
   const isAlreadySubmittedAndBlocked = planStatus?.submitted;
-  const isWindowClosedNotSubmitted = !isWindowOpen && !planStatus?.submitted;
+  const isWindowClosedNotSubmitted = (!isWindowOpen || isPastCutoff) && !planStatus?.submitted;
 
   useEffect(() => {
     if (windowData?.serverTime) {
@@ -345,9 +344,7 @@ export default function PlanForDayPage() {
           <div className="bg-slate-900/50 p-12 rounded-3xl border border-red-500/20 max-w-lg w-full">
             <PowerOff className="w-12 h-12 text-red-500 mx-auto mb-8" />
             <h1 className="text-3xl font-extrabold mb-4">Plan Window Closed</h1>
-            <p className="text-slate-400 mb-8">
-              {isOverrideToday ? "Currently closed by administrator." : (isPastCutoff ? "Closed (12:30 PM cutoff)" : "Currently closed by administrator.")}
-            </p>
+            <p className="text-slate-400 mb-8">{isPastCutoff ? "Closed (12:30 PM cutoff)" : "Currently closed by administrator."}</p>
             <Button onClick={() => setLocation('/tracker')} className="px-8 bg-slate-700">Go to Tracker</Button>
           </div>
         </div>
