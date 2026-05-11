@@ -79,8 +79,9 @@ export default function PlanForDayPage() {
   // Window and Cutoff computations
   const isWindowOpen = !!windowData?.planWindowOpen;
   const isPastCutoff = !!windowData?.isPastCutoff;
+  const isOverrideToday = !!windowData?.isOverrideToday;
   const isAlreadySubmittedAndBlocked = planStatus?.submitted;
-  const isWindowClosedNotSubmitted = (!isWindowOpen || isPastCutoff) && !planStatus?.submitted;
+  const isWindowClosedNotSubmitted = !isWindowOpen && !planStatus?.submitted;
 
   useEffect(() => {
     if (windowData?.serverTime) {
@@ -93,6 +94,20 @@ export default function PlanForDayPage() {
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Reset form state when component mounts or when tab changes
+  useEffect(() => {
+    if (activeTab === 'plan') {
+      setShowUnselectedForm(false);
+    }
+  }, [activeTab]);
+
+  // Ensure form is reset when page first loads or when user comes back to plan tab
+  useEffect(() => {
+    setShowUnselectedForm(false);
+    setAssignedTaskSearch("");
+    setPlannedTaskSearch("");
   }, []);
 
   // Pre-fill selected tasks from existing plan OR auto-synced tasks
@@ -162,13 +177,13 @@ export default function PlanForDayPage() {
     }
   });
 
-  const filteredAvailableTasks = availableTasks.filter((task: any) => 
+  const filteredAvailableTasks = availableTasks.filter((task: any) =>
     (task.task_name.toLowerCase().includes(assignedTaskSearch.toLowerCase()) ||
-    task.projectName.toLowerCase().includes(assignedTaskSearch.toLowerCase())) &&
-    !task.isAutoSelected 
+      task.projectName.toLowerCase().includes(assignedTaskSearch.toLowerCase())) &&
+    !task.isAutoSelected
   );
 
-  const filteredSelectedTasks = selectedTasks.filter((task: any) => 
+  const filteredSelectedTasks = selectedTasks.filter((task: any) =>
     task.task_name.toLowerCase().includes(plannedTaskSearch.toLowerCase()) ||
     task.projectName.toLowerCase().includes(plannedTaskSearch.toLowerCase())
   );
@@ -245,15 +260,15 @@ export default function PlanForDayPage() {
   const getMinutesUntilCutoff = () => {
     // Current time on server
     const serverNow = new Date(currentTime.getTime() + serverTimeOffset);
-    
+
     // Normalize to IST for cutoff comparison
     const utcTime = serverNow.getTime() + (serverNow.getTimezoneOffset() * 60000);
     const istNow = new Date(utcTime + (5.5 * 60 * 60 * 1000));
-    
+
     // Target cutoff: 12:30 PM IST on the same IST day
     const istCutoff = new Date(istNow);
     istCutoff.setUTCHours(12, 30, 0, 0);
-    
+
     const diff = istCutoff.getTime() - istNow.getTime();
     return Math.floor(diff / 60000);
   };
@@ -291,11 +306,11 @@ export default function PlanForDayPage() {
           >
             PLAN HISTORY
           </Button>
-          
+
           {isController && (
             <div className="flex gap-2 ml-4 pl-4 border-l border-slate-800">
-               <Button onClick={() => sendReminderMutation.mutate()} size="sm" variant="outline" className="rounded-xl border-amber-500/20 text-amber-500 hover:bg-amber-500/10">Remind All</Button>
-               <Button onClick={() => sendEODReportMutation.mutate()} size="sm" variant="outline" className="rounded-xl border-green-500/20 text-green-500 hover:bg-green-500/10">EOD Report</Button>
+              <Button onClick={() => sendReminderMutation.mutate()} size="sm" variant="outline" className="rounded-xl border-amber-500/20 text-amber-500 hover:bg-amber-500/10">Remind All</Button>
+              <Button onClick={() => sendEODReportMutation.mutate()} size="sm" variant="outline" className="rounded-xl border-green-500/20 text-green-500 hover:bg-green-500/10">EOD Report</Button>
             </div>
           )}
 
@@ -330,7 +345,9 @@ export default function PlanForDayPage() {
           <div className="bg-slate-900/50 p-12 rounded-3xl border border-red-500/20 max-w-lg w-full">
             <PowerOff className="w-12 h-12 text-red-500 mx-auto mb-8" />
             <h1 className="text-3xl font-extrabold mb-4">Plan Window Closed</h1>
-            <p className="text-slate-400 mb-8">{isPastCutoff ? "Closed (12:30 PM cutoff)" : "Currently closed by administrator."}</p>
+            <p className="text-slate-400 mb-8">
+              {isOverrideToday ? "Currently closed by administrator." : (isPastCutoff ? "Closed (12:30 PM cutoff)" : "Currently closed by administrator.")}
+            </p>
             <Button onClick={() => setLocation('/tracker')} className="px-8 bg-slate-700">Go to Tracker</Button>
           </div>
         </div>
@@ -364,9 +381,9 @@ export default function PlanForDayPage() {
                       <PlannedTaskSearchIcon className="w-12 h-12 text-slate-800 mx-auto" />
                       <p className="text-slate-500 font-medium">No manual tasks available.</p>
                       <div className="p-4 bg-slate-900/50 rounded-xl border border-slate-800 text-[10px] text-slate-600 text-left font-mono">
-                        DEBUG INFO:<br/>
-                        User: {user?.name} ({user?.employeeCode})<br/>
-                        Dept: {user?.department || 'Not Set'}<br/>
+                        DEBUG INFO:<br />
+                        User: {user?.name} ({user?.employeeCode})<br />
+                        Dept: {user?.department || 'Not Set'}<br />
                         ID: {user?.id}
                       </div>
                     </div>
@@ -410,31 +427,31 @@ export default function PlanForDayPage() {
                 <div className="space-y-4">
                   {selectedTasks.some(t => t.isAutoSelected) && (
                     <div className="space-y-2">
-                       <div className="flex items-center gap-2 px-1 text-[10px] font-black text-amber-500 uppercase tracking-widest"><Lock className="w-3 h-3" /> PMS Tasks (Auto)</div>
-                       {selectedTasks.filter(t => t.isAutoSelected).map(task => (
-                          <div key={task.id} className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between">
-                             <div><h4 className="font-black text-amber-100">{task.task_name}</h4><p className="text-[10px] text-amber-500/60 font-bold uppercase">{task.projectName}</p></div>
-                             <Lock className="w-4 h-4 text-amber-500/40" />
-                          </div>
-                       ))}
+                      <div className="flex items-center gap-2 px-1 text-[10px] font-black text-amber-500 uppercase tracking-widest"><Lock className="w-3 h-3" /> PMS Tasks (Auto)</div>
+                      {selectedTasks.filter(t => t.isAutoSelected).map(task => (
+                        <div key={task.id} className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between">
+                          <div><h4 className="font-black text-amber-100">{task.task_name}</h4><p className="text-[10px] text-amber-500/60 font-bold uppercase">{task.projectName}</p></div>
+                          <Lock className="w-4 h-4 text-amber-500/40" />
+                        </div>
+                      ))}
                     </div>
                   )}
                   {selectedTasks.some(t => !t.isAutoSelected) && (
                     <div className="space-y-2 pt-2">
-                       <div className="flex items-center gap-2 px-1 text-[10px] font-black text-blue-500 uppercase tracking-widest"><ClipboardList className="w-3 h-3" /> Manual Tasks</div>
-                       {selectedTasks.filter(t => !t.isAutoSelected).map(task => (
-                          <div key={task.id} className="p-4 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-between">
-                             <div><h4 className="font-black text-blue-100">{task.task_name}</h4><p className="text-[10px] text-blue-400/60 font-bold uppercase">{task.projectName}</p></div>
-                             <Button variant="ghost" size="sm" onClick={() => toggleTask(task)} className="text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-xl">Cancel</Button>
-                          </div>
-                       ))}
+                      <div className="flex items-center gap-2 px-1 text-[10px] font-black text-blue-500 uppercase tracking-widest"><ClipboardList className="w-3 h-3" /> Manual Tasks</div>
+                      {selectedTasks.filter(t => !t.isAutoSelected).map(task => (
+                        <div key={task.id} className="p-4 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-between">
+                          <div><h4 className="font-black text-blue-100">{task.task_name}</h4><p className="text-[10px] text-blue-400/60 font-bold uppercase">{task.projectName}</p></div>
+                          <Button variant="ghost" size="sm" onClick={() => toggleTask(task)} className="text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-xl">Cancel</Button>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
               </ScrollArea>
               <div className="p-6 bg-slate-900/50 border-t border-slate-800 space-y-4">
-                 <div className="flex items-center gap-2 text-xs text-slate-500 font-bold px-1"><AlertTriangle className="w-4 h-4 text-amber-500" /> TASKS MUST BE COMPLETED TODAY.</div>
-                 <Button className="w-full py-7 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-black text-lg rounded-2xl" disabled={selectedTasks.length === 0 || !isWindowOpen || isPastCutoff} onClick={handleNext}>LOCK IN MY PLAN <ArrowRight className="w-6 h-6 ml-3" /></Button>
+                <div className="flex items-center gap-2 text-xs text-slate-500 font-bold px-1"><AlertTriangle className="w-4 h-4 text-amber-500" /> TASKS MUST BE COMPLETED TODAY.</div>
+                <Button className="w-full py-7 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-black text-lg rounded-2xl" disabled={selectedTasks.length === 0 || !isWindowOpen || isPastCutoff} onClick={handleNext}>LOCK IN MY PLAN <ArrowRight className="w-6 h-6 ml-3" /></Button>
               </div>
             </Card>
           </div>
@@ -444,8 +461,8 @@ export default function PlanForDayPage() {
           <Card className="bg-slate-900/80 border-amber-500/20 backdrop-blur-xl">
             <CardHeader className="bg-amber-500/5 border-b border-amber-500/10 p-6">
               <div className="flex items-center gap-4">
-                 <div className="w-12 h-12 bg-amber-500/20 rounded-2xl flex items-center justify-center border border-amber-500/30"><AlertTriangle className="w-6 h-6 text-amber-500" /></div>
-                 <div><CardTitle className="text-2xl font-black text-white">Controlled Deviation Required</CardTitle><p className="text-amber-500/80 font-bold text-sm uppercase">Unselected tasks require justification</p></div>
+                <div className="w-12 h-12 bg-amber-500/20 rounded-2xl flex items-center justify-center border border-amber-500/30"><AlertTriangle className="w-6 h-6 text-amber-500" /></div>
+                <div><CardTitle className="text-2xl font-black text-white">Controlled Deviation Required</CardTitle><p className="text-amber-500/80 font-bold text-sm uppercase">Unselected tasks require justification</p></div>
               </div>
             </CardHeader>
             <CardContent className="p-8 space-y-8">
@@ -453,9 +470,9 @@ export default function PlanForDayPage() {
                 <div>
                   <Label className="text-slate-400 font-bold text-xs uppercase mb-4 block">Pending Tasks Being Postponed</Label>
                   <div className="flex flex-wrap gap-2">
-                     {availableTasks.filter((t: any) => !selectedTasks.find((st: any) => st.id === t.id)).map((task: any) => (
-                       <div key={task.id} className="px-4 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 text-sm font-bold flex items-center gap-2"><Clock className="w-4 h-4 text-amber-500/50" /> {task.task_name}</div>
-                     ))}
+                    {availableTasks.filter((t: any) => !selectedTasks.find((st: any) => st.id === t.id)).map((task: any) => (
+                      <div key={task.id} className="px-4 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 text-sm font-bold flex items-center gap-2"><Clock className="w-4 h-4 text-amber-500/50" /> {task.task_name}</div>
+                    ))}
                   </div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -491,13 +508,13 @@ function HistorySection({ historyDate, setHistoryDate, isLoadingHistory, history
           <Input type="date" value={historyDate} max={today} onChange={(e) => setHistoryDate(e.target.value)} className="bg-slate-950 border-none h-10 w-48 text-sm" />
         </div>
       </div>
-      {isLoadingHistory ? <div className="py-20 text-center"><div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" /><p className="text-slate-500 font-bold uppercase text-xs">Loading...</p></div> : 
-       historyData?.submitted ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <Card className="bg-slate-900 border-slate-800 p-6"><h4 className="text-green-400 font-black mb-4 flex items-center gap-2"><CheckCircle2 className="w-5 h-5" /> SELECTED</h4><div className="space-y-3">{historyData.tasks.map((t: any) => (<div key={t.id} className="p-4 rounded-xl bg-slate-800/50 border border-slate-700/50"><h4 className="font-bold text-slate-100">{t.taskName}</h4><p className="text-xs text-slate-400 uppercase font-bold">{t.projectName}</p></div>))}</div></Card>
-          <Card className="bg-slate-900 border-slate-800 p-6"><h4 className="text-amber-400 font-black mb-4 flex items-center gap-2"><Clock className="w-5 h-5" /> NOT SELECTED</h4><div className="space-y-3">{historyData.postponedTasks.length === 0 ? <p className="text-slate-500 italic">None</p> : historyData.postponedTasks.map((t: any, idx: number) => (<div key={idx} className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/10"><h4 className="font-bold text-amber-100">{t.task_name}</h4><p className="text-sm text-slate-300 italic">{t.reason}</p><p className="text-[10px] text-amber-500/60 uppercase mt-2">Next: {t.new_due_date}</p></div>))}</div></Card>
-        </div>
-      ) : <div className="py-24 text-center bg-slate-900/50 rounded-3xl border border-slate-800 border-dashed"><p className="text-slate-500 font-bold text-lg">No plan submitted for this date.</p></div>}
+      {isLoadingHistory ? <div className="py-20 text-center"><div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" /><p className="text-slate-500 font-bold uppercase text-xs">Loading...</p></div> :
+        historyData?.submitted ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <Card className="bg-slate-900 border-slate-800 p-6"><h4 className="text-green-400 font-black mb-4 flex items-center gap-2"><CheckCircle2 className="w-5 h-5" /> SELECTED</h4><div className="space-y-3">{historyData.tasks.map((t: any) => (<div key={t.id} className="p-4 rounded-xl bg-slate-800/50 border border-slate-700/50"><h4 className="font-bold text-slate-100">{t.taskName}</h4><p className="text-xs text-slate-400 uppercase font-bold">{t.projectName}</p></div>))}</div></Card>
+            <Card className="bg-slate-900 border-slate-800 p-6"><h4 className="text-amber-400 font-black mb-4 flex items-center gap-2"><Clock className="w-5 h-5" /> NOT SELECTED</h4><div className="space-y-3">{historyData.postponedTasks.length === 0 ? <p className="text-slate-500 italic">None</p> : historyData.postponedTasks.map((t: any, idx: number) => (<div key={idx} className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/10"><h4 className="font-bold text-amber-100">{t.task_name}</h4><p className="text-sm text-slate-300 italic">{t.reason}</p><p className="text-[10px] text-amber-500/60 uppercase mt-2">Next: {t.new_due_date}</p></div>))}</div></Card>
+          </div>
+        ) : <div className="py-24 text-center bg-slate-900/50 rounded-3xl border border-slate-800 border-dashed"><p className="text-slate-500 font-bold text-lg">No plan submitted for this date.</p></div>}
     </div>
   );
 }

@@ -1780,13 +1780,16 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
     const isAutomatedClosed = await storage.isDailyPlanClosed(today);
     const isPastCutoff = isAfterPlanCutoff();
     
-    // Portal is open ONLY if manual setting is open AND it hasn't been automated closed AND it's not past 12:30 PM
-    const planWindowOpen = !!settings.planWindowOpen && !isAutomatedClosed && !isPastCutoff;
+    // Manual override logic: If admin explicitly toggled today, use that state.
+    // Otherwise, use the default automated logic (open until cutoff).
+    const isOverrideToday = settings.planWindowLastModifiedDate === today;
+    const planWindowOpen = isOverrideToday ? !!settings.planWindowOpen : (!isAutomatedClosed && !isPastCutoff);
 
     res.json({ 
       planWindowOpen,
       isAutomatedClosed,
       isPastCutoff,
+      isOverrideToday,
       cutoffTime: "12:30 PM",
       serverTime: new Date().toISOString()
     });
@@ -1801,7 +1804,14 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
       }
       const settings = await readSettings();
       const wasOpen = !!settings.planWindowOpen;
+      
+      const now = new Date();
+      const utcNow = now.getTime() + (now.getTimezoneOffset() * 60000);
+      const istNow = new Date(utcNow + (5.5 * 60 * 60 * 1000));
+      const today = format(istNow, "yyyy-MM-dd");
+
       settings.planWindowOpen = !!open;
+      settings.planWindowLastModifiedDate = today;
       await writeSettings(settings);
 
       // Trigger email if portal is closed
@@ -1839,20 +1849,23 @@ function shouldSyncPMSTask(task: PMSTask, targetDateStr: string): boolean {
       const now = new Date();
       const planDate = date || now.toISOString().split('T')[0];
 
-      // Check if plan window toggle is open (manual control has priority, but 12:30 cutoff is STRICT)
+      // Check if plan window is open (manual override has priority)
       const settings = await readSettings();
       const isPastCutoff = isAfterPlanCutoff();
+      
+      const istNow = new Date(new Date().getTime() + (new Date().getTimezoneOffset() * 60000) + (5.5 * 60 * 60 * 1000));
+      const today = format(istNow, "yyyy-MM-dd");
+      const isAutomatedClosed = await storage.isDailyPlanClosed(today);
+      
+      const isOverrideToday = settings.planWindowLastModifiedDate === today;
+      const planWindowOpen = isOverrideToday ? !!settings.planWindowOpen : (!isAutomatedClosed && !isPastCutoff);
 
-      if (isPastCutoff) {
+      if (!planWindowOpen) {
+        const reason = isPastCutoff ? "12:30 PM cutoff" : "administrative closure";
         return res.status(403).json({ 
-          error: "Plan window is strictly closed for today (12:30 PM cutoff).",
-          message: "Plan closed for today (12:30 PM cutoff)"
+          error: `Plan window is closed (${reason}). Contact your administrator to reopen.`,
+          message: `Plan window is closed (${reason})`
         });
-      }
-
-      if (!settings.planWindowOpen) {
-        // Portal is manually CLOSED - block submissions
-        return res.status(403).json({ error: "Plan window is currently closed. Submissions are not allowed. Contact your administrator to reopen." });
       }
 
       // Portal is manually OPEN and not past cutoff - allow submissions
