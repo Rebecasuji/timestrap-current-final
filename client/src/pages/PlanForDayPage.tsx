@@ -79,8 +79,9 @@ export default function PlanForDayPage() {
   // Window and Cutoff computations
   const isWindowOpen = !!windowData?.planWindowOpen;
   const isPastCutoff = !!windowData?.isPastCutoff;
+  const isOverrideToday = !!windowData?.isOverrideToday;
   const isAlreadySubmittedAndBlocked = planStatus?.submitted;
-  const isWindowClosedNotSubmitted = (!isWindowOpen || isPastCutoff) && !planStatus?.submitted;
+  const isWindowClosedNotSubmitted = !isWindowOpen && !planStatus?.submitted;
 
   useEffect(() => {
     if (windowData?.serverTime) {
@@ -227,7 +228,7 @@ export default function PlanForDayPage() {
   };
 
   const submitPlan = () => {
-    if (!isWindowOpen || isPastCutoff) {
+    if (!isWindowOpen) {
       toast({ title: "Submission Blocked", description: "The plan window is closed.", variant: "destructive" });
       return;
     }
@@ -344,7 +345,9 @@ export default function PlanForDayPage() {
           <div className="bg-slate-900/50 p-12 rounded-3xl border border-red-500/20 max-w-lg w-full">
             <PowerOff className="w-12 h-12 text-red-500 mx-auto mb-8" />
             <h1 className="text-3xl font-extrabold mb-4">Plan Window Closed</h1>
-            <p className="text-slate-400 mb-8">{isPastCutoff ? "Closed (12:30 PM cutoff)" : "Currently closed by administrator."}</p>
+            <p className="text-slate-400 mb-8">
+              {isOverrideToday ? "Currently closed by administrator." : (isPastCutoff ? "Closed (12:30 PM cutoff)" : "Currently closed by administrator.")}
+            </p>
             <Button onClick={() => setLocation('/tracker')} className="px-8 bg-slate-700">Go to Tracker</Button>
           </div>
         </div>
@@ -448,7 +451,7 @@ export default function PlanForDayPage() {
               </ScrollArea>
               <div className="p-6 bg-slate-900/50 border-t border-slate-800 space-y-4">
                 <div className="flex items-center gap-2 text-xs text-slate-500 font-bold px-1"><AlertTriangle className="w-4 h-4 text-amber-500" /> TASKS MUST BE COMPLETED TODAY.</div>
-                <Button className="w-full py-7 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-black text-lg rounded-2xl" disabled={selectedTasks.length === 0 || !isWindowOpen || isPastCutoff} onClick={handleNext}>LOCK IN MY PLAN <ArrowRight className="w-6 h-6 ml-3" /></Button>
+                <Button className="w-full py-7 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-black text-lg rounded-2xl" disabled={selectedTasks.length === 0 || !isWindowOpen} onClick={handleNext}>LOCK IN MY PLAN <ArrowRight className="w-6 h-6 ml-3" /></Button>
               </div>
             </Card>
           </div>
